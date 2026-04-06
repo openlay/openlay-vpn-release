@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# WireGuard Agent API — Uninstall Script
+# OpenLay VPN Agent — Uninstall Script
 # Run as root: ./uninstall.sh [options]
 #
 # Usage:
 #   ./uninstall.sh              # Interactive — asks before each step
 #   ./uninstall.sh --force      # Remove everything without asking
 #   ./uninstall.sh --keep-wg    # Remove agent but keep WireGuard config & interface
-#   ./uninstall.sh --keep-user  # Remove agent but keep wgagent user
+#   ./uninstall.sh --keep-user  # Remove agent but keep olv-agent user
 # =============================================================================
 set -e
 
@@ -43,10 +43,10 @@ done
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SERVICE_USER="wgagent"
+SERVICE_USER="olv-agent"
 HOME_DIR="/home/${SERVICE_USER}"
 APP_DIR="${HOME_DIR}/wireguard-agent-api"
-SERVICE_NAME="wireguard-agent-api"
+SERVICE_NAME="olv-agent"
 WG_CONFIG_DIR="/etc/wireguard"
 WG_IFACE="wg0"
 
@@ -75,10 +75,10 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo ""
-echo -e "${RED}=== WireGuard Agent API — Uninstaller ===${NC}"
+echo -e "${RED}=== OpenLay VPN Agent — Uninstaller ===${NC}"
 echo ""
 if [ "$FORCE" != true ]; then
-  echo "This will remove the WireGuard Agent API and related configuration."
+  echo "This will remove the OpenLay VPN Agent and related configuration."
   echo "Options: --keep-wg (keep WireGuard), --keep-user (keep user), --force (no prompts)"
   echo ""
 fi

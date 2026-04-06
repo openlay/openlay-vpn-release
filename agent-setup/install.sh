@@ -1,12 +1,12 @@
 #!/bin/bash
 # =============================================================================
-# WireGuard Agent API — Install Script
+# OpenLay VPN Agent — Install Script
 # Run as root: ./install.sh [options]
 #
 # Usage:
 #   ./install.sh
-#   ./install.sh -MANAGEMENT_URL=https://mgmt.example.com:3001
-#   ./install.sh -MANAGEMENT_URL=https://mgmt.example.com:3001 -MANAGEMENT_TOKEN=mytoken
+#   ./install.sh -MANAGEMENT_URL=https://mgmt.example.com:3001 -ENROLLMENT_TOKEN=xxx
+#   ./install.sh -MANAGEMENT_URL=https://mgmt:3001 -ENROLLMENT_TOKEN=xxx -MANAGEMENT_TOKEN=legacy
 #   ./install.sh -GIT_REPO=https://github.com/org/repo.git -GIT_BRANCH=dev
 # =============================================================================
 set -e
@@ -18,6 +18,7 @@ for arg in "$@"; do
   case "$arg" in
     -MANAGEMENT_URL=*)  MANAGEMENT_URL="${arg#*=}" ;;
     -MANAGEMENT_TOKEN=*) MANAGEMENT_TOKEN="${arg#*=}" ;;
+    -ENROLLMENT_TOKEN=*) ENROLLMENT_TOKEN="${arg#*=}" ;;
     -GIT_REPO=*)        GIT_REPO="${arg#*=}" ;;
     -GIT_BRANCH=*)      GIT_BRANCH="${arg#*=}" ;;
     -PORT=*)            AGENT_PORT="${arg#*=}" ;;
@@ -27,7 +28,8 @@ for arg in "$@"; do
       echo ""
       echo "Options:"
       echo "  -MANAGEMENT_URL=URL     Management server URL (e.g. https://mgmt:3001)"
-      echo "  -MANAGEMENT_TOKEN=TOKEN Token to authenticate with management server"
+      echo "  -MANAGEMENT_TOKEN=TOKEN Token for legacy auth with management server"
+      echo "  -ENROLLMENT_TOKEN=TOKEN  Enrollment token for cert-based auth (recommended)"
       echo "  -GIT_REPO=URL           Git repository URL"
       echo "  -GIT_BRANCH=BRANCH      Git branch (default: main)"
       echo "  -PORT=PORT              Agent listen port (default: 3000)"
@@ -45,10 +47,10 @@ done
 # ---------------------------------------------------------------------------
 # Configuration (defaults, overridden by args above)
 # ---------------------------------------------------------------------------
-SERVICE_USER="wgagent"
+SERVICE_USER="olv-agent"
 HOME_DIR="/home/${SERVICE_USER}"
 APP_DIR="${HOME_DIR}/wireguard-agent-api"
-SERVICE_NAME="wireguard-agent-api"
+SERVICE_NAME="olv-agent"
 GIT_REPO="${GIT_REPO:-https://github.com/openlay/openlay-vpn.git}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 WG_CONFIG_DIR="${WG_CONFIG_DIR:-/etc/wireguard}"
@@ -59,6 +61,7 @@ if [ -n "$MANAGEMENT_URL" ] && [[ ! "$MANAGEMENT_URL" =~ /api$ ]]; then
   MANAGEMENT_URL="${MANAGEMENT_URL%/}/api"
 fi
 MANAGEMENT_TOKEN="${MANAGEMENT_TOKEN:-}"
+ENROLLMENT_TOKEN="${ENROLLMENT_TOKEN:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -77,7 +80,7 @@ if [ "$EUID" -ne 0 ]; then
   error "This script must be run as root"
 fi
 
-info "=== WireGuard Agent API — Installer ==="
+info "=== OpenLay VPN Agent — Installer ==="
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -207,7 +210,7 @@ else
       info "  Copying local source to ${APP_DIR}..."
       mkdir -p "$APP_DIR"
       cp -r ./src ./package.json ./package-lock.json ./.env.example "$APP_DIR/" 2>/dev/null
-      cp ./wireguard-agent-api.service "$APP_DIR/" 2>/dev/null || true
+      cp ./olv-agent.service "$APP_DIR/" 2>/dev/null || true
     else
       error "No source available. Place source in current directory or fix git URL."
     fi
@@ -286,11 +289,16 @@ WG_CONFIG_DIR=${WG_CONFIG_DIR}
 AUDIT_LOG_FILE=./audit.log
 AUDIT_LOG_MAX=1000
 
-# Management Server (edit these to connect to your management server)
+# Management Server
 MANAGEMENT_API_URL=${MANAGEMENT_URL}
 MANAGEMENT_API_TOKEN=${MANAGEMENT_TOKEN}
 MANAGEMENT_CA_CERT=./certs/management-ca.crt
 HEARTBEAT_INTERVAL=30
+
+# Enrollment token (for cert-based auth — recommended)
+# Agent uses this to enroll and get a signed certificate from management CA.
+# After enrollment, cert is used for auth and this token is no longer needed.
+ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
 
 # IP Whitelist (empty = allow all, comma-separated)
 ALLOWED_IPS=
@@ -515,13 +523,13 @@ else
 fi
 
 # Install systemd service
-if [ -f "$APP_DIR/wireguard-agent-api.service" ]; then
+if [ -f "$APP_DIR/olv-agent.service" ]; then
   # Update paths in service file
-  sed -i "s|WorkingDirectory=.*|WorkingDirectory=${APP_DIR}|" "$APP_DIR/wireguard-agent-api.service"
-  sed -i "s|EnvironmentFile=.*|EnvironmentFile=${APP_DIR}/.env|" "$APP_DIR/wireguard-agent-api.service"
-  sed -i "s|ReadWritePaths=.*|ReadWritePaths=${WG_CONFIG_DIR} ${APP_DIR}|" "$APP_DIR/wireguard-agent-api.service"
+  sed -i "s|WorkingDirectory=.*|WorkingDirectory=${APP_DIR}|" "$APP_DIR/olv-agent.service"
+  sed -i "s|EnvironmentFile=.*|EnvironmentFile=${APP_DIR}/.env|" "$APP_DIR/olv-agent.service"
+  sed -i "s|ReadWritePaths=.*|ReadWritePaths=${WG_CONFIG_DIR} ${APP_DIR}|" "$APP_DIR/olv-agent.service"
 
-  cp "$APP_DIR/wireguard-agent-api.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+  cp "$APP_DIR/olv-agent.service" "/etc/systemd/system/${SERVICE_NAME}.service"
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME"
   systemctl restart "$SERVICE_NAME"
@@ -550,7 +558,7 @@ if [ -f "$APP_DIR/wireguard-agent-api.service" ]; then
     fi
   fi
 else
-  warn "  Service file not found. Create manually or copy wireguard-agent-api.service"
+  warn "  Service file not found. Create manually or copy olv-agent.service"
 fi
 
 # ---------------------------------------------------------------------------

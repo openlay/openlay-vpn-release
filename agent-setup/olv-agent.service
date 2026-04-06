@@ -1,0 +1,45 @@
+[Unit]
+Description=OpenLay VPN Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/olv-agent/wireguard-agent-api
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+
+# Run as dedicated user
+User=olv-agent
+Group=olv-agent
+
+# Environment
+EnvironmentFile=/home/olv-agent/wireguard-agent-api/.env
+
+# Capabilities: only what's needed for WireGuard management
+# CAP_NET_ADMIN: wg set, wg-quick up/down, ip link, iptables
+# CAP_NET_RAW:   raw sockets for WireGuard
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Only allow writes to WireGuard config + app directory
+ReadWritePaths=/etc/wireguard /home/olv-agent/wireguard-agent-api
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=olv-agent
+
+[Install]
+WantedBy=multi-user.target
