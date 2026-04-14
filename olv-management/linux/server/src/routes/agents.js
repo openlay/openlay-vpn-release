@@ -68,10 +68,11 @@ router.post('/register', async (req, res) => {
         `UPDATE servers
          SET api_token = $1, description = $2, hostname = $3,
              url = $4, instance_id = COALESCE(NULLIF($5, ''), instance_id),
+             public_ip = COALESCE(NULLIF($7, ''), public_ip),
              updated_at = NOW()
          WHERE id = $6
-         RETURNING id, name, url, hostname, description`,
-        [apiToken, description, hostname || '', publicUrl, agentId || '', existing.id]
+         RETURNING id, name, url, hostname, description, public_ip`,
+        [apiToken, description, hostname || '', publicUrl, agentId || '', existing.id, publicIp || '']
       );
       server = rows[0];
       if (urlChanged) {
@@ -81,10 +82,10 @@ router.post('/register', async (req, res) => {
       }
     } else {
       const { rows } = await pool.query(
-        `INSERT INTO servers (name, url, api_token, description, hostname, instance_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, url, hostname, description`,
-        [serverName, publicUrl, apiToken, description, hostname || '', agentId || '']
+        `INSERT INTO servers (name, url, api_token, description, hostname, instance_id, public_ip)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, name, url, hostname, description, public_ip`,
+        [serverName, publicUrl, apiToken, description, hostname || '', agentId || '', publicIp || '']
       );
       server = rows[0];
       console.log(`[agents] New agent registered: "${serverName}" → ${publicUrl} (id=${server.id}, instanceId=${agentId || 'none'})`);
@@ -115,7 +116,7 @@ router.post('/register', async (req, res) => {
 // POST /api/agents/heartbeat
 router.post('/heartbeat', async (req, res) => {
   try {
-    const { agentId, publicUrl, interfaces } = req.body;
+    const { agentId, publicUrl, publicIp, interfaces } = req.body;
 
     if (!publicUrl) {
       return res.status(400).json({ error: 'publicUrl is required' });
@@ -150,8 +151,9 @@ router.post('/heartbeat', async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE servers SET url = $1, instance_id = COALESCE(NULLIF($2, ''), instance_id), updated_at = NOW() WHERE id = $3`,
-      [publicUrl, agentId || '', found.id]
+      `UPDATE servers SET url = $1, instance_id = COALESCE(NULLIF($2, ''), instance_id),
+       public_ip = COALESCE(NULLIF($4, ''), public_ip), updated_at = NOW() WHERE id = $3`,
+      [publicUrl, agentId || '', found.id, publicIp || '']
     );
 
     // Sync subnets on heartbeat too (pick up new interfaces)
