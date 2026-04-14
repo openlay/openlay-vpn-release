@@ -1,0 +1,39 @@
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Certificates (generated per deploy)
+certs/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Build artifacts
+*.tgz
+*.tar.gz
+*.zip
+
+# Logs
+*.log
+
+# SSH keys
+.ssh/

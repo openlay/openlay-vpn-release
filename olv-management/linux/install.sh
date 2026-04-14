@@ -83,7 +83,7 @@ echo ""
 # Interactive prompts (skipped if value passed via CLI args)
 # ---------------------------------------------------------------------------
 ask DOMAIN        "Domain name (e.g. mng.livevpn.com)" ""
-ask DB_NAME       "Database name" "wireguard_management"
+ask DB_NAME       "Database name" "olv_management"
 ask DB_URL        "PostgreSQL URL" "postgres://${SERVICE_USER}@127.0.0.1:5432/${DB_NAME}"
 ask JWT_SECRET    "JWT secret (leave blank to auto-generate)" ""
 ask APPLE_TEAM_ID "Apple Team ID (leave blank to skip)" ""
@@ -115,7 +115,16 @@ if ! command -v node &>/dev/null; then
   fi
 fi
 
-if ! command -v openssl &>/dev/null; then error "OpenSSL is required but not found."; fi
+if ! command -v openssl &>/dev/null; then
+  warn "OpenSSL not found. Installing..."
+  if command -v apt-get &>/dev/null; then
+    apt-get install -y -qq openssl
+  elif command -v yum &>/dev/null || command -v dnf &>/dev/null; then
+    yum install -y openssl 2>/dev/null || dnf install -y openssl
+  else
+    error "Cannot install OpenSSL. Install manually and re-run."
+  fi
+fi
 
 info "  node: $(node --version)"
 
