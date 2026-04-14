@@ -84,9 +84,14 @@ function attachWebSocketServer(httpsServer) {
         if (rows.length > 0) {
           serverId = rows[0].id;
           registry.register(serverId, ws, { agentId, hostname: '' });
-          await pool.query('UPDATE servers SET updated_at = NOW() WHERE id = $1', [serverId]);
+          // Update public_ip from WebSocket remote address (strip IPv6 prefix)
+          const remoteIp = (ip || '').replace(/^::ffff:/, '');
+          await pool.query(
+            'UPDATE servers SET updated_at = NOW(), public_ip = COALESCE(NULLIF($2, \'\'), public_ip) WHERE id = $1',
+            [serverId, remoteIp]
+          );
           ws.send(JSON.stringify({ type: 'welcome', id: null, payload: { serverId, auth: 'cert' } }));
-          console.log(`[wsServer] Agent identified via cert: serverId=${serverId} agentId=${agentId}`);
+          console.log(`[wsServer] Agent identified via cert: serverId=${serverId} agentId=${agentId} remoteIp=${remoteIp}`);
 
           // Start keepalive
           pingTimer = setInterval(() => {
