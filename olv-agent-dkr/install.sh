@@ -71,7 +71,30 @@ info "[1/5] Checking Docker..."
 
 if ! command -v docker &>/dev/null; then
   info "  Installing Docker..."
-  curl -fsSL https://get.docker.com | sh
+  # Try official script first
+  if ! curl -fsSL https://get.docker.com | sh 2>/dev/null; then
+    warn "  Official Docker install failed. Trying manual repo setup..."
+    # Rocky/RHEL: use centos repo as fallback (Docker doesn't always support latest Rocky)
+    if command -v dnf &>/dev/null; then
+      dnf install -y dnf-plugins-core 2>/dev/null || true
+      # Remove broken repo if exists
+      rm -f /etc/yum.repos.d/docker-ce.repo 2>/dev/null
+      # Use centos stream as base (compatible with Rocky)
+      RELEASEVER=$(rpm -E %rhel 2>/dev/null || echo "9")
+      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+      sed -i "s|\$releasever|${RELEASEVER}|g" /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
+      dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    elif command -v yum &>/dev/null; then
+      yum install -y yum-utils
+      yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    elif command -v apt-get &>/dev/null; then
+      apt-get install -y docker.io docker-compose-plugin 2>/dev/null || \
+      apt-get install -y docker.io docker-compose
+    else
+      error "Cannot install Docker. Install manually and re-run."
+    fi
+  fi
   systemctl enable --now docker
 fi
 
