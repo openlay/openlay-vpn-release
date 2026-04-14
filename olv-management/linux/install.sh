@@ -357,16 +357,28 @@ info "  Services installed"
 info "[9/10] Configuring firewall..."
 
 set +e
+FIREWALL_OPENED=false
 if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=3084/tcp 2>/dev/null || true
-  firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
+  firewall-cmd --permanent --add-port=3084/tcp 2>/dev/null
+  firewall-cmd --permanent --add-port=443/tcp 2>/dev/null
   firewall-cmd --reload 2>/dev/null
+  FIREWALL_OPENED=true
+  info "  firewalld: opened ports 3084/tcp, 443/tcp"
 elif command -v ufw &>/dev/null; then
-  ufw allow 3084/tcp 2>/dev/null || true
-  ufw allow 443/tcp 2>/dev/null || true
+  ufw allow 3084/tcp 2>/dev/null
+  ufw allow 443/tcp 2>/dev/null
+  FIREWALL_OPENED=true
+  info "  ufw: opened ports 3084/tcp, 443/tcp"
 elif command -v iptables &>/dev/null; then
   iptables -C INPUT -p tcp --dport 3084 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 3084 -j ACCEPT 2>/dev/null
   iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null
+  iptables-save > /etc/iptables.rules 2>/dev/null || true
+  FIREWALL_OPENED=true
+  info "  iptables: opened ports 3084/tcp, 443/tcp"
+fi
+if [ "$FIREWALL_OPENED" = false ]; then
+  warn "  No firewall detected. Make sure ports 3084/tcp and 443/tcp are accessible."
+  warn "  If using cloud (AWS/GCP/Azure), open these ports in your Security Group."
 fi
 set -e
 
