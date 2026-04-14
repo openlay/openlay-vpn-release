@@ -1,0 +1,25 @@
+services:
+  olv-agent:
+    build: .
+    container_name: olv-agent
+    restart: always
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    network_mode: host
+    volumes:
+      - wireguard-config:/etc/wireguard
+      - agent-certs:/app/certs
+    env_file:
+      - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  wireguard-config:
+  agent-certs:
