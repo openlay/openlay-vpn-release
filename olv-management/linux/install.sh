@@ -86,8 +86,9 @@ ask DOMAIN        "Domain name (e.g. mng.livevpn.com)" ""
 ask DB_NAME       "Database name" "olv_management"
 ask DB_URL        "PostgreSQL URL" "postgres://${SERVICE_USER}@127.0.0.1:5432/${DB_NAME}"
 ask JWT_SECRET    "JWT secret (leave blank to auto-generate)" ""
-ask APPLE_TEAM_ID "Apple Team ID (leave blank to skip)" ""
-ask APPLE_CLIENT_IDS "Apple Client IDs" "com.openlay.management"
+
+APPLE_TEAM_ID="${APPLE_TEAM_ID:-4VG6UTF567}"
+APPLE_CLIENT_IDS="${APPLE_CLIENT_IDS:-com.openlay.management}"
 
 # Auto-generate JWT secret if left blank
 if [ -z "$JWT_SECRET" ]; then
