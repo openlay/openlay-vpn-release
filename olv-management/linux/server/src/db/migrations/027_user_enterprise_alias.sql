@@ -1,0 +1,1 @@
+ALTER TABLE user_enterprise_roles ADD COLUMN IF NOT EXISTS alias VARCHAR(255) DEFAULT '';

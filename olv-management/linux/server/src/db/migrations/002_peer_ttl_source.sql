@@ -1,0 +1,5 @@
+ALTER TABLE peers_meta ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT NULL;
+ALTER TABLE peers_meta ADD COLUMN IF NOT EXISTS allowed_source_ip VARCHAR(255) DEFAULT NULL;
+ALTER TABLE peers_meta ADD COLUMN IF NOT EXISTS is_expired BOOLEAN DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_peers_meta_expires ON peers_meta(expires_at) WHERE expires_at IS NOT NULL AND is_expired = FALSE;
