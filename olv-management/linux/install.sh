@@ -215,12 +215,15 @@ for f in /var/lib/pgsql/data/pg_hba.conf /etc/postgresql/*/main/pg_hba.conf; do
   [ -f "$f" ] && PG_HBA="$f" && break
 done
 if [ -n "$PG_HBA" ]; then
-  if ! grep -q "host all ${SERVICE_USER}" "$PG_HBA" 2>/dev/null; then
-    echo "host all ${SERVICE_USER} 127.0.0.1/32 trust" >> "$PG_HBA"
-    echo "host all ${SERVICE_USER} ::1/128 trust" >> "$PG_HBA"
-    systemctl reload postgresql 2>/dev/null
-    info "  PostgreSQL TCP access configured"
-  fi
+  # Remove any old entries for this user
+  sed -i "/host all ${SERVICE_USER}/d" "$PG_HBA" 2>/dev/null || true
+  # Insert trust rules at the TOP (before ident/peer rules that would override)
+  sed -i "1i host all ${SERVICE_USER} ::1/128 trust" "$PG_HBA"
+  sed -i "1i host all ${SERVICE_USER} 127.0.0.1/32 trust" "$PG_HBA"
+  # Also allow local socket connections with trust
+  sed -i "1i local all ${SERVICE_USER} trust" "$PG_HBA"
+  systemctl reload postgresql 2>/dev/null
+  info "  PostgreSQL access configured (trust for ${SERVICE_USER})"
 fi
 
 sudo -u postgres createuser -s "${SERVICE_USER}" 2>/dev/null || true
