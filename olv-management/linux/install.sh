@@ -63,10 +63,10 @@ ask() {
   local current="${!var_name}"
   if [ -n "$current" ]; then return; fi
   if [ -n "$default" ]; then
-    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt} [${default}]: " input
+    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt} [${default}]: " input < /dev/tty
     eval "$var_name=\"${input:-$default}\""
   else
-    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt}: " input
+    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt}: " input < /dev/tty
     eval "$var_name=\"$input\""
   fi
 }

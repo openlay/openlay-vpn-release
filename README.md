@@ -5,7 +5,9 @@ Server deployment packages for OpenLay VPN infrastructure.
 ## Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh | sudo bash -s -- install olv-management
+curl -fsSL -o olv.sh https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh
+chmod +x olv.sh
+sudo ./olv.sh install olv-management
 ```
 
 ## Packages
