@@ -158,9 +158,10 @@ cp "$SCRIPT_DIR/package-lock.json" "$MGMT_DIR/" 2>/dev/null || true
 info "  Management server: ${MGMT_DIR}"
 
 # App API
-cp -r "$SCRIPT_DIR/app-api" "$APP_API_DIR/../app-api-tmp"
-rm -rf "$APP_API_DIR"
-mv "$APP_API_DIR/../app-api-tmp" "$APP_API_DIR"
+rm -rf "$APP_API_DIR/src" "$APP_API_DIR/package.json" "$APP_API_DIR/package-lock.json"
+cp -r "$SCRIPT_DIR/app-api/src" "$APP_API_DIR/src"
+cp "$SCRIPT_DIR/app-api/package.json" "$APP_API_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR/app-api/package-lock.json" "$APP_API_DIR/" 2>/dev/null || true
 info "  App API: ${APP_API_DIR}"
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$HOME_DIR"
