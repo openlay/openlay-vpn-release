@@ -120,20 +120,15 @@ case "$PACKAGE" in
     ;;
 
   olv-agent)
-    SCRIPT_DIR="$INSTALL_DIR/agent-setup"
+    SCRIPT_DIR="$INSTALL_DIR/olv-agent-dkr"
     case "$ACTION" in
       install)
         [ -f "$SCRIPT_DIR/install.sh" ] || error "install.sh not found in $SCRIPT_DIR"
         bash "$SCRIPT_DIR/install.sh" "${@:3}"
         ;;
       update)
-        if [ -f "$SCRIPT_DIR/update.sh" ]; then
-          bash "$SCRIPT_DIR/update.sh" "${@:3}"
-        else
-          # Fallback: re-run install for update
-          warn "No update.sh found, re-running install.sh..."
-          bash "$SCRIPT_DIR/install.sh" "${@:3}"
-        fi
+        [ -f "$SCRIPT_DIR/update.sh" ] || error "update.sh not found in $SCRIPT_DIR"
+        bash "$SCRIPT_DIR/update.sh" "${@:3}"
         ;;
       uninstall)
         [ -f "$SCRIPT_DIR/uninstall.sh" ] || error "uninstall.sh not found in $SCRIPT_DIR"

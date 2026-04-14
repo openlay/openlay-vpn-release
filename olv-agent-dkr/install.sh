@@ -57,9 +57,9 @@ echo -e "${GREEN}  OpenLay VPN Agent (Docker) — Installer${NC}"
 echo "==========================================="
 echo ""
 
-ask MANAGEMENT_URL  "Management server URL (e.g. https://mng.example.com:3084)" ""
+ask MANAGEMENT_URL  "Management server URL" "https://localhost:3084"
 ask ENROLLMENT_TOKEN "Enrollment token" ""
-ask WG_PORT         "WireGuard listen port" "51820"
+ask WG_PORT         "VPN listen port" "51820"
 
 if [ -z "$MANAGEMENT_URL" ]; then error "Management URL is required"; fi
 if [ -z "$ENROLLMENT_TOKEN" ]; then error "Enrollment token is required"; fi
