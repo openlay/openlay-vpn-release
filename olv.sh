@@ -39,6 +39,7 @@ usage() {
   echo "  install     Install a package"
   echo "  update      Update an existing installation"
   echo "  uninstall   Remove a package"
+  echo "  init-root   Create root admin account (olv-management only)"
   echo ""
   echo "Packages:"
   echo "  olv-management   Management server + App API + Dashboard"
@@ -46,8 +47,10 @@ usage() {
   echo ""
   echo "Examples:"
   echo "  $0 install olv-management"
-  echo "  $0 update olv-agent"
-  echo "  $0 uninstall olv-management"
+  echo "  $0 init-root olv-management"
+  echo "  $0 install olv-agent"
+  echo "  $0 update olv-management"
+  echo "  $0 uninstall olv-agent"
   echo ""
   exit 1
 }
@@ -113,8 +116,12 @@ case "$PACKAGE" in
         [ -f "$SCRIPT_DIR/uninstall.sh" ] || error "uninstall.sh not found in $SCRIPT_DIR"
         bash "$SCRIPT_DIR/uninstall.sh" "${@:3}"
         ;;
+      init-root)
+        [ -f "$SCRIPT_DIR/init-root.sh" ] || error "init-root.sh not found in $SCRIPT_DIR"
+        bash "$SCRIPT_DIR/init-root.sh" "${@:3}"
+        ;;
       *)
-        error "Unknown action: $ACTION (use install, update, or uninstall)"
+        error "Unknown action: $ACTION (use install, update, uninstall, or init-root)"
         ;;
     esac
     ;;
