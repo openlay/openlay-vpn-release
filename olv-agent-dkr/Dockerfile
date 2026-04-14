@@ -8,7 +8,10 @@ RUN apk add --no-cache \
     conntrack-tools \
     openssl \
     bash \
-    curl
+    curl \
+    git \
+    docker-cli \
+    docker-cli-compose
 
 WORKDIR /app
 

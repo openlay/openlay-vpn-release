@@ -329,6 +329,31 @@ router.get('/:id/health', async (req, res) => {
   }
 });
 
+// GET /api/servers/:id/agent-version
+router.get('/:id/agent-version', async (req, res) => {
+  try {
+    const client = new AgentClient(parseInt(req.params.id));
+    const health = await client.health();
+    res.json({ version: health.version || 'unknown' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/servers/:id/agent-update — root only
+router.post('/:id/agent-update', async (req, res) => {
+  if (req.enterpriseRole !== 'root') {
+    return res.status(403).json({ error: 'Root access required' });
+  }
+  try {
+    const client = new AgentClient(parseInt(req.params.id));
+    const result = await client.request('update', {}, 15000);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/servers/:id/users — only users in this enterprise
 router.get('/:id/users', async (req, res) => {
   try {
@@ -360,8 +385,10 @@ router.post('/:id/users', async (req, res) => {
     if (!user_id || !interface_name) {
       return res.status(400).json({ error: 'user_id and interface_name are required' });
     }
-    // Verify server belongs to enterprise
-    const sCheck = await pool.query('SELECT 1 FROM servers WHERE id = $1 AND enterprise_id = $2', [req.params.id, req.enterpriseId]);
+    // Verify server belongs to enterprise (root can access any server)
+    const sCheck = req.enterpriseRole === 'root'
+      ? await pool.query('SELECT 1 FROM servers WHERE id = $1', [req.params.id])
+      : await pool.query('SELECT 1 FROM servers WHERE id = $1 AND enterprise_id = $2', [req.params.id, req.enterpriseId]);
     if (sCheck.rows.length === 0) return res.status(404).json({ error: 'Server not found' });
     // Verify user belongs to enterprise
     const uCheck = await pool.query('SELECT 1 FROM user_enterprise_roles WHERE user_id = $1 AND enterprise_id = $2', [user_id, req.enterpriseId]);

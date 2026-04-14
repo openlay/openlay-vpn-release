@@ -43,6 +43,16 @@ The installer will prompt for:
 - PostgreSQL URL
 - JWT secret (auto-generated if blank)
 
+### Create Root Admin
+
+After install, create the first admin account:
+
+```bash
+sudo ./olv.sh init-root olv-management
+```
+
+This will prompt for username, email, password and create a root account that can manage all enterprises.
+
 ### What Gets Installed
 
 | Service | Port | Description |
@@ -55,6 +65,9 @@ Auto-installs: Node.js 20, PostgreSQL, OpenSSL, TLS certs, systemd services.
 ### Management Commands
 
 ```bash
+# Create root admin
+sudo ./olv.sh init-root olv-management
+
 # Update
 sudo ./olv.sh update olv-management
 

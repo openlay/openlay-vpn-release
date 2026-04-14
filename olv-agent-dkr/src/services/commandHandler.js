@@ -3,6 +3,8 @@ const firewall = require('./firewall');
 const dnsFilter = require('./dnsFilter');
 const audit = require('./audit');
 const os = require('os');
+const { spawn } = require('child_process');
+const pkg = require('../../package.json');
 
 /**
  * Dispatch WebSocket commands to existing WireGuard service functions.
@@ -13,10 +15,21 @@ const handlers = {
   async health() {
     return {
       status: 'ok',
+      version: pkg.version,
       hostname: os.hostname(),
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
     };
+  },
+
+  // Self-update: pull latest release and rebuild Docker container
+  async update() {
+    const child = spawn('bash', ['-c',
+      'cd /opt/openlay-vpn-release && git pull && cd olv-agent-dkr && bash update.sh'
+    ], { detached: true, stdio: 'ignore' });
+    child.unref();
+    audit.log('update', { pid: child.pid });
+    return { ok: true, message: 'Agent update started. Container will restart shortly.' };
   },
 
   // Interfaces

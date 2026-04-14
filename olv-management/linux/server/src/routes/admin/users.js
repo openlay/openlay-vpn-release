@@ -20,8 +20,9 @@ router.get('/', async (req, res) => {
     const conditions = [];
     const params = [];
 
-    // Enterprise scope
-    if (!isRoot) {
+    // Enterprise scope — always filter by enterprise when one is selected,
+    // even for root users (prevents cross-enterprise assignment errors)
+    if (req.enterpriseId) {
       params.push(req.enterpriseId);
       conditions.push(`u.id IN (SELECT user_id FROM user_enterprise_roles WHERE enterprise_id = $${params.length})`);
     }

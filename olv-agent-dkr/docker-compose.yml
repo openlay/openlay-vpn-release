@@ -12,6 +12,9 @@ services:
     volumes:
       - wireguard-config:/etc/wireguard
       - agent-certs:/app/certs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/openlay-vpn-release:/opt/openlay-vpn-release
+      - /opt/olv-agent:/opt/olv-agent
     env_file:
       - .env
     logging:
