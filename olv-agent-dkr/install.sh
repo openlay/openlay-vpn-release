@@ -59,7 +59,8 @@ echo ""
 
 ask MANAGEMENT_URL  "Management server URL" "https://localhost:3084"
 ask ENROLLMENT_TOKEN "Enrollment token" ""
-ask WG_PORT         "VPN listen port" "51820"
+
+WG_PORT="${WG_PORT:-51820}"
 
 if [ -z "$MANAGEMENT_URL" ]; then error "Management URL is required"; fi
 if [ -z "$ENROLLMENT_TOKEN" ]; then error "Enrollment token is required"; fi
@@ -145,7 +146,6 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
   cat > "$INSTALL_DIR/.env" << ENVEOF
 MANAGEMENT_API_URL=${MANAGEMENT_URL}/api
 ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
-WG_PORT=${WG_PORT}
 WG_CONFIG_DIR=/etc/wireguard
 AUDIT_LOG_FILE=/var/log/olv-agent-audit.log
 HEARTBEAT_INTERVAL=30000
@@ -165,10 +165,10 @@ cd "$INSTALL_DIR"
 # Open WireGuard port
 set +e
 if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=${WG_PORT}/udp 2>/dev/null || true
+  firewall-cmd --permanent --add-port=51820-51830/udp 2>/dev/null || true
   firewall-cmd --reload 2>/dev/null
 elif command -v ufw &>/dev/null; then
-  ufw allow ${WG_PORT}/udp 2>/dev/null || true
+  ufw allow 51820:51830/udp 2>/dev/null || true
 fi
 set -e
 
@@ -198,7 +198,7 @@ fi
 echo "==========================================="
 echo ""
 echo "  Install dir:    ${INSTALL_DIR}"
-echo "  WireGuard port: ${WG_PORT}/udp"
+echo "  VPN ports:      51820-51830/udp"
 echo "  Management:     ${MANAGEMENT_URL}"
 echo ""
 echo "  Logs:    cd ${INSTALL_DIR} && docker compose logs -f"
