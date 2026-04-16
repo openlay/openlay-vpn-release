@@ -22,6 +22,43 @@ const handlers = {
     };
   },
 
+  // System stats: CPU, RAM, Network
+  async systemStats() {
+    const cpus = os.cpus();
+    const cpuCount = cpus.length;
+    const cpuModel = cpus[0]?.model || 'Unknown';
+
+    // CPU usage (compute over a 200ms window)
+    const cpuUsage = await measureCpuUsage();
+
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+
+    const loadavg = os.loadavg();
+
+    // Network interfaces — sum bytes from /proc/net/dev (Linux only)
+    const network = await readNetworkStats();
+
+    return {
+      cpu: {
+        count: cpuCount,
+        model: cpuModel,
+        usagePercent: cpuUsage,
+        loadavg: { one: loadavg[0], five: loadavg[1], fifteen: loadavg[2] },
+      },
+      memory: {
+        total: totalMem,
+        used: usedMem,
+        free: freeMem,
+        usagePercent: Math.round((usedMem / totalMem) * 100),
+      },
+      network,
+      uptime: os.uptime(),
+      timestamp: new Date().toISOString(),
+    };
+  },
+
   // Self-update: pull latest release and rebuild Docker container
   async update() {
     const child = spawn('bash', ['-c',
@@ -338,6 +375,50 @@ async function execute(type, payload = {}) {
   } catch (err) {
     console.error(`[command] ${type} FAILED:`, err.message);
     throw err;
+  }
+}
+
+// ----- system stats helpers -----
+
+function cpuTotal(cpu) {
+  return Object.values(cpu.times).reduce((a, b) => a + b, 0);
+}
+
+async function measureCpuUsage() {
+  const start = os.cpus();
+  await new Promise(r => setTimeout(r, 200));
+  const end = os.cpus();
+  let totalDiff = 0, idleDiff = 0;
+  for (let i = 0; i < start.length; i++) {
+    totalDiff += cpuTotal(end[i]) - cpuTotal(start[i]);
+    idleDiff += end[i].times.idle - start[i].times.idle;
+  }
+  if (totalDiff === 0) return 0;
+  return Math.round(((totalDiff - idleDiff) / totalDiff) * 100);
+}
+
+async function readNetworkStats() {
+  // Try Linux /proc/net/dev first
+  try {
+    const fs = require('fs');
+    const content = fs.readFileSync('/proc/net/dev', 'utf8');
+    const lines = content.split('\n').slice(2);
+    const interfaces = [];
+    let totalRx = 0, totalTx = 0;
+    for (const line of lines) {
+      const m = line.trim().match(/^(\S+):\s+(\d+)(?:\s+\d+){7}\s+(\d+)/);
+      if (!m) continue;
+      const name = m[1].replace(':', '');
+      if (name === 'lo') continue;
+      const rx = parseInt(m[2], 10);
+      const tx = parseInt(m[3], 10);
+      interfaces.push({ name, rxBytes: rx, txBytes: tx });
+      totalRx += rx;
+      totalTx += tx;
+    }
+    return { totalRx, totalTx, interfaces };
+  } catch {
+    return { totalRx: 0, totalTx: 0, interfaces: [] };
   }
 }
 

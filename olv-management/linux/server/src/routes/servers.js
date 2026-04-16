@@ -351,6 +351,17 @@ router.get('/:id/agent-logs', async (req, res) => {
   }
 });
 
+// GET /api/servers/:id/system-stats
+router.get('/:id/system-stats', async (req, res) => {
+  try {
+    const client = new AgentClient(parseInt(req.params.id));
+    const stats = await client.request('systemStats', {}, 5000);
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/servers/:id/agent-version
 router.get('/:id/agent-version', async (req, res) => {
   try {
