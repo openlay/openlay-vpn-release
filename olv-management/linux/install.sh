@@ -352,6 +352,15 @@ systemctl daemon-reload
 systemctl enable "$MGMT_SERVICE" "$APP_API_SERVICE"
 info "  Services installed"
 
+# Allow service user to run update.sh via sudo (for self-update from iOS app)
+cat > "/etc/sudoers.d/${SERVICE_USER}" << SUDOEOF
+${SERVICE_USER} ALL=(ALL) NOPASSWD: /bin/bash /opt/openlay-vpn-release/olv-management/linux/update.sh
+${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/bin/git -C /opt/openlay-vpn-release pull
+${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/bin/git -C /opt/openlay-vpn-release fetch
+SUDOEOF
+chmod 440 "/etc/sudoers.d/${SERVICE_USER}"
+info "  Sudoers rule installed for self-update"
+
 # ---------------------------------------------------------------------------
 # 9. Firewall
 # ---------------------------------------------------------------------------

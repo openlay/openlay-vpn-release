@@ -21,10 +21,13 @@ router.post('/update', (req, res) => {
 
   res.json({ ok: true, message: 'Update started. Server will restart shortly.' });
 
-  // Spawn update AFTER response is sent — update.sh will kill this process
+  // Spawn update AFTER response is sent — update.sh will kill this process.
+  // Run with sudo so systemctl/chown work even when the service user is not root.
+  // Sudoers rule at /etc/sudoers.d/olv-management grants NOPASSWD for these commands.
   setImmediate(() => {
     const child = spawn('bash', ['-c',
-      'cd /opt/openlay-vpn-release && git pull && cd olv-management/linux && bash update.sh'
+      'sudo -n /usr/bin/git -C /opt/openlay-vpn-release pull && ' +
+      'sudo -n /bin/bash /opt/openlay-vpn-release/olv-management/linux/update.sh'
     ], { detached: true, stdio: 'ignore' });
     child.unref();
   });

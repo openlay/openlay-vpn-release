@@ -59,11 +59,29 @@ const handlers = {
     };
   },
 
-  // Self-update: pull latest release and rebuild Docker container
+  // Self-update: pull latest release and rebuild Docker container.
+  // Key trick: `docker compose down` kills this container. To survive container
+  // termination, we launch a SEPARATE short-lived container (via Docker socket)
+  // that runs the update script on the host mount points. That updater container
+  // is NOT a child of this container, so it survives when we're stopped.
   async update() {
-    const child = spawn('bash', ['-c',
-      'cd /opt/openlay-vpn-release && git pull && cd olv-agent-dkr && bash update.sh'
-    ], { detached: true, stdio: 'ignore' });
+    const { spawn } = require('child_process');
+
+    // Launch an updater container that waits 2s, then runs update.sh on host paths
+    const updaterCmd = [
+      'run', '--rm', '--detach',
+      '--name', 'olv-agent-updater',
+      '-v', '/var/run/docker.sock:/var/run/docker.sock',
+      '-v', '/opt/openlay-vpn-release:/opt/openlay-vpn-release',
+      '-v', '/opt/olv-agent:/opt/olv-agent',
+      'docker:28-cli',
+      'sh', '-c',
+      'sleep 2 && apk add --no-cache git bash && ' +
+      'cd /opt/openlay-vpn-release && git pull || true && ' +
+      'cd /opt/openlay-vpn-release/olv-agent-dkr && bash update.sh',
+    ];
+
+    const child = spawn('docker', updaterCmd, { detached: true, stdio: 'ignore' });
     child.unref();
     audit.log('update', { pid: child.pid });
     return { ok: true, message: 'Agent update started. Container will restart shortly.' };
