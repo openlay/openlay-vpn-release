@@ -72,7 +72,7 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { client, server } = await getClientAndServer(req.params.serverId, req);
-    const { mode, subnetId: _sid, subnet_id: _sid2, alias, notes, persistentKeepalive, ttlHours, allowedSourceIp } = req.body;
+    const { mode, subnetId: _sid, subnet_id: _sid2, alias, notes, persistentKeepalive, ttlHours, allowedSourceIp, requestedIp } = req.body;
     const subnetId = _sid || _sid2;
     const iface = req.params.iface;
 
@@ -110,8 +110,22 @@ router.post('/', async (req, res) => {
         }
       } catch { /* ignore */ }
 
-      const { getNextAvailableIp } = require('../services/subnetUtils');
-      const nextIp = getNextAvailableIp(subnet.cidr, usedIps);
+      const { getNextAvailableIp, isIpInCidr } = require('../services/subnetUtils');
+      let nextIp;
+      if (requestedIp) {
+        // Validate requested IP is in subnet and not already used
+        const cleanIp = requestedIp.replace(/\/\d+$/, ''); // strip /32 if present
+        if (!isIpInCidr(cleanIp, subnet.cidr)) {
+          return res.status(400).json({ error: `IP ${cleanIp} is not in subnet ${subnet.cidr}` });
+        }
+        const usedClean = usedIps.map(ip => ip.replace(/\/\d+$/, ''));
+        if (usedClean.includes(cleanIp)) {
+          return res.status(409).json({ error: `IP ${cleanIp} is already in use` });
+        }
+        nextIp = cleanIp;
+      } else {
+        nextIp = getNextAvailableIp(subnet.cidr, usedIps);
+      }
       if (!nextIp) {
         return res.status(409).json({ error: 'No available IPs in this subnet' });
       }

@@ -130,7 +130,9 @@ async function createInterface(name, listenPort, addressV4, opts = {}) {
   iface.PrivateKey = privateKey;
 
   if (opts.mtu) iface.MTU = String(opts.mtu);
-  if (opts.dns) iface.DNS = opts.dns;
+  // NOTE: DNS is NOT set in server-side WG config — it causes wg-quick to
+  // invoke resolvconf which fails inside Docker containers. DNS is only
+  // relevant for client-side configs and is sent via the connect API response.
 
   // NAT + forwarding rules (auto-applied on interface up/down)
   iface.PostUp = `sysctl -w net.ipv4.ip_forward=1 || true; iptables -t nat -A POSTROUTING -s ${subnet} -o ${defaultIface} -j MASQUERADE; iptables -A FORWARD -i ${name} -j ACCEPT; iptables -A FORWARD -o ${name} -m state --state RELATED,ESTABLISHED -j ACCEPT`;

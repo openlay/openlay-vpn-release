@@ -329,6 +329,28 @@ router.get('/:id/health', async (req, res) => {
   }
 });
 
+// GET /api/servers/:id/agent-logs?limit=100&type=audit|firewall
+router.get('/:id/agent-logs', async (req, res) => {
+  if (req.enterpriseRole !== 'root') {
+    return res.status(403).json({ error: 'Root access required' });
+  }
+  try {
+    const client = new AgentClient(parseInt(req.params.id));
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const type = req.query.type || 'audit';
+
+    if (type === 'firewall') {
+      const result = await client.request('firewallGetLogs', { limit }, 10000);
+      res.json({ type: 'firewall', logs: result.logs || [] });
+    } else {
+      const result = await client.request('getAuditLogs', { limit, offset: 0 }, 10000);
+      res.json({ type: 'audit', logs: result.entries || [], total: result.total || 0 });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/servers/:id/agent-version
 router.get('/:id/agent-version', async (req, res) => {
   try {

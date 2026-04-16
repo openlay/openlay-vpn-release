@@ -272,7 +272,7 @@ async function buildAgentPayload() {
   return {
     agentId: id,
     name: os.hostname(),
-    publicUrl: `https://${publicIp}:${config.port}`,
+    publicUrl: `https://${publicIp}`,
     apiToken: config.apiToken,
     hostname: os.hostname(),
     publicIp,
