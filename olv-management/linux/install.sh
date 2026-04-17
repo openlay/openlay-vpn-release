@@ -62,6 +62,11 @@ ask() {
   local var_name="$1" prompt="$2" default="$3"
   local current="${!var_name}"
   if [ -n "$current" ]; then return; fi
+  # If no tty (non-interactive), use default and don't prompt
+  if [ ! -t 0 ] && [ ! -r /dev/tty ]; then
+    eval "$var_name=\"${default}\""
+    return
+  fi
   if [ -n "$default" ]; then
     read -rp "$(echo -e "${CYAN}?${NC}") ${prompt} [${default}]: " input < /dev/tty
     eval "$var_name=\"${input:-$default}\""
