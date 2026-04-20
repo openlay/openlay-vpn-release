@@ -20,8 +20,23 @@ function rulesPath(iface) {
 
 async function loadRules(iface) {
   try {
-    return JSON.parse(await fs.readFile(rulesPath(iface), 'utf8'));
+    const rules = JSON.parse(await fs.readFile(rulesPath(iface), 'utf8'));
+    return rules.map(toCanonicalRule);
   } catch { return []; }
+}
+
+// Drop any snake_case aliases and keep a single camelCase field per attribute,
+// so clients consuming this JSON get a predictable shape.
+function toCanonicalRule(rule) {
+  const { src_ip, dst_ip, src_port, dst_port, srcIp, dstIp, proto, ...rest } = rule;
+  const canonical = { ...rest };
+  const assignIfDefined = (key, value) => { if (value !== undefined && value !== null) canonical[key] = value; };
+  assignIfDefined('srcIP', rule.srcIP ?? src_ip ?? srcIp);
+  assignIfDefined('dstIP', rule.dstIP ?? dst_ip ?? dstIp);
+  assignIfDefined('srcPort', rule.srcPort ?? src_port);
+  assignIfDefined('dstPort', rule.dstPort ?? dst_port);
+  assignIfDefined('protocol', rule.protocol ?? proto);
+  return canonical;
 }
 
 async function saveRules(iface, rules) {
@@ -269,6 +284,7 @@ async function getAllRules() {
 
 async function addRule(iface, rule) {
   await ensureChain(iface);
+  rule = toCanonicalRule(rule);
   rule.id = rule.id || generateId();
   rule.iface = iface;
   rule.createdAt = new Date().toISOString();
