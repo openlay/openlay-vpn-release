@@ -11,6 +11,12 @@ const SETTING_DEFAULTS = {
     defaultValue: 'false',
     description: 'When enabled, new devices require admin approval before they can connect',
   },
+  peer_ttl_hours: {
+    // NODE_ENV=development → 15 minutes (0.25h) so dev keys rotate quickly;
+    // otherwise 24 hours. Admin can override per enterprise.
+    defaultValue: process.env.NODE_ENV === 'development' ? '0.25' : '24',
+    description: 'Hours before a newly issued peer key expires (0 = never). Dev default 0.25h (15m), prod 24h.',
+  },
 };
 
 // GET /api/admin/settings — per-enterprise settings
@@ -26,7 +32,7 @@ router.get('/', async (req, res) => {
     // Start with defaults
     for (const [key, def] of Object.entries(SETTING_DEFAULTS)) {
       settings[key] = {
-        value: def.defaultValue === 'true',
+        value: coerceSettingValue(def.defaultValue),
         description: def.description,
         updated_at: null,
       };
@@ -35,7 +41,7 @@ router.get('/', async (req, res) => {
     // Override with stored values
     for (const row of rows) {
       settings[row.key] = {
-        value: row.value === 'true' ? true : row.value === 'false' ? false : row.value,
+        value: coerceSettingValue(row.value),
         description: row.description || SETTING_DEFAULTS[row.key]?.description || null,
         updated_at: row.updated_at,
       };
@@ -72,11 +78,11 @@ router.put('/', async (req, res) => {
     );
     const settings = {};
     for (const [k, def] of Object.entries(SETTING_DEFAULTS)) {
-      settings[k] = { value: def.defaultValue === 'true', description: def.description, updated_at: null };
+      settings[k] = { value: coerceSettingValue(def.defaultValue), description: def.description, updated_at: null };
     }
     for (const row of rows) {
       settings[row.key] = {
-        value: row.value === 'true' ? true : row.value === 'false' ? false : row.value,
+        value: coerceSettingValue(row.value),
         description: row.description || SETTING_DEFAULTS[row.key]?.description || null,
         updated_at: row.updated_at,
       };
@@ -87,4 +93,29 @@ router.put('/', async (req, res) => {
   }
 });
 
+// Settings stored as TEXT — return typed value so iOS/client can bind directly.
+// Booleans round-trip as 'true'/'false' strings; anything else is a number if
+// parseable, otherwise raw string.
+function coerceSettingValue(raw) {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw === null || raw === undefined || raw === '') return raw;
+  const n = Number(raw);
+  if (!Number.isNaN(n) && String(n) === String(raw)) return n;
+  return raw;
+}
+
+// Exported so other routes (e.g. app-api /connect) can read settings with the
+// same defaults/coercion. Keeps the "source of truth" for known keys in one file.
+async function getSetting(enterpriseId, key) {
+  const { rows } = await pool.query(
+    'SELECT value FROM enterprise_settings WHERE enterprise_id = $1 AND key = $2',
+    [enterpriseId, key]
+  );
+  const raw = rows[0]?.value ?? SETTING_DEFAULTS[key]?.defaultValue;
+  return coerceSettingValue(raw);
+}
+
 module.exports = router;
+module.exports.getSetting = getSetting;
+module.exports.SETTING_DEFAULTS = SETTING_DEFAULTS;

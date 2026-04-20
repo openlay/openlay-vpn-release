@@ -6,6 +6,24 @@ const { getNextAvailableIp } = require('../services/subnetUtils');
 
 const router = Router();
 
+// Peer key TTL in hours. Reads enterprise-level setting (peer_ttl_hours), falls
+// back to NODE_ENV-aware default (15m dev, 24h prod). 0 or negative = never.
+async function resolvePeerTtlHours(enterpriseId) {
+  const fallback = process.env.NODE_ENV === 'development' ? 0.25 : 24;
+  if (!enterpriseId) return fallback;
+  try {
+    const { rows } = await pool.query(
+      'SELECT value FROM enterprise_settings WHERE enterprise_id = $1 AND key = $2',
+      [enterpriseId, 'peer_ttl_hours']
+    );
+    if (rows.length === 0) return fallback;
+    const n = Number(rows[0].value);
+    return Number.isFinite(n) ? n : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * Resolve which server/interface/subnet to use.
  * If serverId is provided, validate user has access.
@@ -364,14 +382,19 @@ router.post('/', async (req, res) => {
     }
     const endpoint = `${serverHost}:${listenPort}`;
 
+    // Resolve peer TTL from enterprise setting (dev default 0.25h = 15m, prod 24h).
+    // A value of 0 (or non-positive) means "never expire".
+    const ttlHours = await resolvePeerTtlHours(server.enterprise_id);
+    const expiresAt = ttlHours > 0 ? new Date(Date.now() + ttlHours * 3600 * 1000).toISOString() : null;
+
     // Save peer metadata
     const { rows: peerMeta } = await pool.query(
-      `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, device_id, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, device_id, user_id, expires_at, is_expired)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
        ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
-       SET subnet_id = $4, alias = $5, device_id = $6, user_id = $7
+       SET subnet_id = $4, alias = $5, device_id = $6, user_id = $7, expires_at = $8, is_expired = FALSE
        RETURNING id`,
-      [server.id, interfaceName, wgPublicKey, subnetId, alias, device.id, req.user.id]
+      [server.id, interfaceName, wgPublicKey, subnetId, alias, device.id, req.user.id, expiresAt]
     );
 
     // New peer IP joined this user — ask management to refresh firewall rules referencing them.
