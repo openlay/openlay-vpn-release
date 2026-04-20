@@ -1,207 +1,186 @@
 #!/bin/bash
-# =============================================================================
-# OpenLay VPN Agent (Docker) — Install Script
-# Run as root: ./install.sh [options]
+set -e
+
+# ─────────────────────────────────────────────────────────────
+# OpenLay VPN Agent — Docker One-Line Installer
 #
 # Usage:
-#   ./install.sh
-#   ./install.sh -MANAGEMENT_URL=https://mng.example.com:3084 -TOKEN=xxx
-# =============================================================================
-set -e
+#   curl -sSL <url>/install.sh | bash -s -- \
+#     -REPO=git@github.com:org/olv-agent-dkr.git \
+#     -MANAGEMENT_URL=https://mngs.livevpn.com:3084/api \
+#     -ENROLLMENT_TOKEN=xxx \
+#     -SSH_KEY=/path/to/deploy_key
+#
+# Or with all defaults:
+#   ./install.sh -REPO=... -ENROLLMENT_TOKEN=...
+# ─────────────────────────────────────────────────────────────
 
+APP_DIR="/opt/olv-agent"
+BRANCH="stable"
+
+# Parse KEY=VALUE arguments
 for arg in "$@"; do
-  case "$arg" in
-    -MANAGEMENT_URL=*) MANAGEMENT_URL="${arg#*=}" ;;
-    -TOKEN=*)          ENROLLMENT_TOKEN="${arg#*=}" ;;
-    -WG_PORT=*)        WG_PORT="${arg#*=}" ;;
-    -h|--help)
-      echo "Usage: ./install.sh [options]"
-      echo ""
-      echo "Options:"
-      echo "  -MANAGEMENT_URL=URL   Management server URL (e.g. https://mng.example.com:3084)"
-      echo "  -TOKEN=TOKEN          Enrollment token from management dashboard"
-      echo "  -WG_PORT=PORT         WireGuard listen port (default: 51820)"
-      echo ""
-      exit 0
-      ;;
-    *) echo "Unknown option: $arg (use --help)"; exit 1 ;;
-  esac
+    case "$arg" in
+        -REPO=*) REPO="${arg#*=}" ;;
+        -BRANCH=*) BRANCH="${arg#*=}" ;;
+        -MANAGEMENT_URL=*) MANAGEMENT_URL="${arg#*=}" ;;
+        -ENROLLMENT_TOKEN=*) ENROLLMENT_TOKEN="${arg#*=}" ;;
+        -SSH_KEY=*) SSH_KEY="${arg#*=}" ;;
+        -APP_DIR=*) APP_DIR="${arg#*=}" ;;
+    esac
 done
 
-INSTALL_DIR="/opt/olv-agent"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "$REPO" ]; then
+    echo "ERROR: -REPO is required"
+    echo "Usage: ./install.sh -REPO=git@github.com:org/repo.git -ENROLLMENT_TOKEN=xxx"
+    exit 1
+fi
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+echo "═══════════════════════════════════════════════════════"
+echo "  OpenLay VPN Agent — Docker Installer"
+echo "═══════════════════════════════════════════════════════"
+echo "  Repo:       $REPO"
+echo "  Branch:     $BRANCH"
+echo "  App dir:    $APP_DIR"
+echo "  Management: ${MANAGEMENT_URL:-https://mngs.livevpn.com:3084/api}"
+echo "═══════════════════════════════════════════════════════"
 
-ask() {
-  local var_name="$1" prompt="$2" default="$3"
-  local current="${!var_name}"
-  if [ -n "$current" ]; then return; fi
-  if [ -n "$default" ]; then
-    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt} [${default}]: " input < /dev/tty
-    eval "$var_name=\"${input:-$default}\""
-  else
-    read -rp "$(echo -e "${CYAN}?${NC}") ${prompt}: " input < /dev/tty
-    eval "$var_name=\"$input\""
-  fi
-}
-
-if [ "$EUID" -ne 0 ]; then error "This script must be run as root"; fi
-
-echo ""
-echo "==========================================="
-echo -e "${GREEN}  OpenLay VPN Agent (Docker) — Installer${NC}"
-echo "==========================================="
-echo ""
-
-ask MANAGEMENT_URL  "Management server URL" "https://localhost:3084"
-ask ENROLLMENT_TOKEN "Enrollment token" ""
-
-WG_PORT="${WG_PORT:-51820}"
-
-if [ -z "$MANAGEMENT_URL" ]; then error "Management URL is required"; fi
-if [ -z "$ENROLLMENT_TOKEN" ]; then error "Enrollment token is required"; fi
-
-# ---------------------------------------------------------------------------
-# 1. Install Docker
-# ---------------------------------------------------------------------------
-info "[1/5] Checking Docker..."
+# ── 1. Install Docker ──────────────────────────────────────
 
 if ! command -v docker &>/dev/null; then
-  info "  Installing Docker..."
-  # Try official script first
-  if ! curl -fsSL https://get.docker.com | sh 2>/dev/null; then
-    warn "  Official Docker install failed. Trying manual repo setup..."
-    # Rocky/RHEL: use centos repo as fallback (Docker doesn't always support latest Rocky)
+    echo "[1/7] Installing Docker..."
     if command -v dnf &>/dev/null; then
-      dnf install -y dnf-plugins-core 2>/dev/null || true
-      # Remove broken repo if exists
-      rm -f /etc/yum.repos.d/docker-ce.repo 2>/dev/null
-      # Use centos stream as base (compatible with Rocky)
-      RELEASEVER=$(rpm -E %rhel 2>/dev/null || echo "9")
-      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
-      sed -i "s|\$releasever|${RELEASEVER}|g" /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
-      dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-    elif command -v yum &>/dev/null; then
-      yum install -y yum-utils
-      yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-      yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
     elif command -v apt-get &>/dev/null; then
-      apt-get install -y docker.io docker-compose-plugin 2>/dev/null || \
-      apt-get install -y docker.io docker-compose
+        curl -fsSL https://get.docker.com | sh
+    elif command -v apk &>/dev/null; then
+        apk add docker docker-compose
     else
-      error "Cannot install Docker. Install manually and re-run."
+        echo "ERROR: Unsupported package manager. Install Docker manually."
+        exit 1
     fi
-  fi
-  systemctl enable --now docker
+    systemctl enable --now docker
+else
+    echo "[1/7] Docker already installed: $(docker --version)"
 fi
 
-if ! docker compose version &>/dev/null 2>&1; then
-  if ! docker-compose version &>/dev/null 2>&1; then
-    warn "  Docker Compose not found. Installing plugin..."
-    mkdir -p /usr/local/lib/docker/cli-plugins
-    COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)"
-    curl -fsSL "$COMPOSE_URL" -o /usr/local/lib/docker/cli-plugins/docker-compose
-    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-  fi
+# ── 2. Setup SSH key ───────────────────────────────────────
+
+echo "[2/7] Setting up SSH deploy key..."
+mkdir -p "$APP_DIR/.ssh"
+
+if [ -n "$SSH_KEY" ] && [ -f "$SSH_KEY" ]; then
+    cp "$SSH_KEY" "$APP_DIR/.ssh/deploy_key"
+elif [ ! -f "$APP_DIR/.ssh/deploy_key" ]; then
+    echo "No SSH key provided. Generating new key pair..."
+    ssh-keygen -t ed25519 -f "$APP_DIR/.ssh/deploy_key" -N "" -C "olv-agent-deploy"
+    echo ""
+    echo "╔══════════════════════════════════════════════════╗"
+    echo "║  Add this deploy key to your git repo:          ║"
+    echo "╚══════════════════════════════════════════════════╝"
+    cat "$APP_DIR/.ssh/deploy_key.pub"
+    echo ""
+    read -p "Press Enter after adding the key to continue..." _
+fi
+chmod 600 "$APP_DIR/.ssh/deploy_key"
+
+export GIT_SSH_COMMAND="ssh -i $APP_DIR/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+# ── 3. Clone repo ──────────────────────────────────────────
+
+if [ -d "$APP_DIR/.git" ]; then
+    echo "[3/7] Repo exists, pulling latest..."
+    cd "$APP_DIR"
+    git fetch origin "$BRANCH"
+    git reset --hard "origin/$BRANCH"
+else
+    echo "[3/7] Cloning repo..."
+    git clone -b "$BRANCH" "$REPO" "$APP_DIR"
+    cd "$APP_DIR"
 fi
 
-info "  Docker: $(docker --version)"
+# ── 4. Create .env ─────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# 2. Enable IP forwarding
-# ---------------------------------------------------------------------------
-info "[2/5] Enabling IP forwarding..."
+echo "[4/7] Configuring .env..."
+if [ ! -f "$APP_DIR/.env" ]; then
+    cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+    if [ -n "$MANAGEMENT_URL" ]; then
+        sed -i "s|^MANAGEMENT_API_URL=.*|MANAGEMENT_API_URL=$MANAGEMENT_URL|" "$APP_DIR/.env"
+    fi
+    if [ -n "$ENROLLMENT_TOKEN" ]; then
+        sed -i "s|^ENROLLMENT_TOKEN=.*|ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN|" "$APP_DIR/.env"
+    fi
+    echo "  .env created"
+else
+    echo "  .env already exists, skipping"
+fi
 
+# ── 5. Enable ip_forward ──────────────────────────────────
+
+echo "[5/7] Enabling ip_forward..."
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
-  echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-fi
-info "  IP forwarding enabled"
-
-# ---------------------------------------------------------------------------
-# 3. Copy application files
-# ---------------------------------------------------------------------------
-info "[3/5] Installing application files..."
-
-mkdir -p "$INSTALL_DIR"
-cp "$SCRIPT_DIR/Dockerfile" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/docker-entrypoint.sh" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/package.json" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/package-lock.json" "$INSTALL_DIR/" 2>/dev/null || true
-cp -r "$SCRIPT_DIR/src" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/docker-entrypoint.sh"
-info "  Files installed: ${INSTALL_DIR}"
-
-# ---------------------------------------------------------------------------
-# 4. Create .env
-# ---------------------------------------------------------------------------
-info "[4/5] Creating configuration..."
-
-if [ ! -f "$INSTALL_DIR/.env" ]; then
-  cat > "$INSTALL_DIR/.env" << ENVEOF
-MANAGEMENT_API_URL=${MANAGEMENT_URL}/api
-ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
-WG_CONFIG_DIR=/etc/wireguard
-AUDIT_LOG_FILE=/var/log/olv-agent-audit.log
-HEARTBEAT_INTERVAL=30000
-ENVEOF
-  info "  .env created"
-else
-  info "  .env exists — preserving"
+if ! grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.d/99-wireguard.conf 2>/dev/null; then
+    echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-wireguard.conf
 fi
 
-# ---------------------------------------------------------------------------
-# 5. Build and start
-# ---------------------------------------------------------------------------
-info "[5/5] Building and starting agent..."
+# ── 5b. firewalld: allow VPN traffic ──────────────────────
+# On distros that run firewalld (RHEL/Rocky), the default filter_FORWARD chain
+# ends with "reject with admin-prohibited". VPN peer-to-peer packets go through
+# this chain and get dropped unless the VPN subnets/interfaces are trusted.
 
-cd "$INSTALL_DIR"
-
-# Open WireGuard port
-set +e
 if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=51820-51830/udp 2>/dev/null || true
-  firewall-cmd --reload 2>/dev/null
+    echo "  Configuring firewalld (WG ports + trusted VPN subnets)..."
+    firewall-cmd --permanent --add-port=51820-51830/udp >/dev/null 2>&1 || true
+    # Trust common VPN subnets so peer-to-peer and peer-to-LAN forwarding passes
+    # firewalld's filter_FORWARD chain. Trusting sources rather than interfaces
+    # avoids having to re-register each new wg/olv iface the agent creates.
+    for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        firewall-cmd --permanent --zone=trusted --add-source=$cidr >/dev/null 2>&1 || true
+    done
+    firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+
+# ── 6. Build & Start ──────────────────────────────────────
+
+echo "[6/7] Building and starting Docker container..."
+cd "$APP_DIR"
+docker compose build
+docker compose up -d
+
+# Wait for agent to connect
+echo "  Waiting for agent to start..."
+sleep 5
+if docker ps --format '{{.Names}}' | grep -q olv-agent; then
+    echo "  Container running"
+else
+    echo "  WARNING: Container may not be running. Check: docker logs olv-agent"
+fi
+
+# ── 7. Install auto-update timer ──────────────────────────
+
+echo "[7/7] Installing auto-update timer (every 5 min)..."
+chmod +x "$APP_DIR/setup/auto-update.sh"
+cp "$APP_DIR/setup/olv-auto-update.service" /etc/systemd/system/
+cp "$APP_DIR/setup/olv-auto-update.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now olv-auto-update.timer
+
+# ── Done ──────────────────────────────────────────────────
+
+echo ""
+echo "═══════════════════════════════════════════════════════"
+echo "  Installation complete!"
+echo "═══════════════════════════════════════════════════════"
+echo "  App dir:     $APP_DIR"
+echo "  Container:   docker logs olv-agent"
+echo "  Auto-update: systemctl list-timers | grep olv"
+echo "  Config:      $APP_DIR/.env"
+echo ""
+echo "  Firewall: open UDP ports 51820-51830"
+if command -v firewall-cmd &>/dev/null; then
+    echo "    firewall-cmd --permanent --add-port=51820-51830/udp && firewall-cmd --reload"
 elif command -v ufw &>/dev/null; then
-  ufw allow 51820:51830/udp 2>/dev/null || true
+    echo "    ufw allow 51820:51830/udp"
 fi
-set -e
-
-docker compose build 2>&1 | tail -3
-docker compose up -d 2>&1
-
-sleep 3
-
-if docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
-  RUNNING=true
-elif docker compose ps 2>/dev/null | grep -q "Up"; then
-  RUNNING=true
-else
-  RUNNING=false
-fi
-
-cd "$OLDPWD"
-
-echo ""
-echo "==========================================="
-if [ "$RUNNING" = true ]; then
-  echo -e "${GREEN}Agent installed and running!${NC}"
-else
-  echo -e "${YELLOW}Agent installed but may not be running.${NC}"
-  echo "  Check: cd ${INSTALL_DIR} && docker compose logs"
-fi
-echo "==========================================="
-echo ""
-echo "  Install dir:    ${INSTALL_DIR}"
-echo "  VPN ports:      51820-51830/udp"
-echo "  Management:     ${MANAGEMENT_URL}"
-echo ""
-echo "  Logs:    cd ${INSTALL_DIR} && docker compose logs -f"
-echo "  Restart: cd ${INSTALL_DIR} && docker compose restart"
-echo "  Stop:    cd ${INSTALL_DIR} && docker compose down"
-echo ""
+echo "═══════════════════════════════════════════════════════"

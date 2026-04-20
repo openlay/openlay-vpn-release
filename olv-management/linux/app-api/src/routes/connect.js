@@ -265,6 +265,9 @@ router.post('/', async (req, res) => {
       [device.id]
     );
 
+    // Collect servers where the user lost peers here — we'll resync rules AFTER
+    // the new peer is added so the re-expansion sees the current IP set, not
+    // the transient gap between remove and add.
     const resyncTargetsByServer = new Map();
     for (const oldPeer of existingPeers) {
       try {
@@ -275,15 +278,6 @@ router.post('/', async (req, res) => {
       if (oldPeer.user_id) {
         if (!resyncTargetsByServer.has(oldPeer.server_id)) resyncTargetsByServer.set(oldPeer.server_id, new Set());
         resyncTargetsByServer.get(oldPeer.server_id).add(oldPeer.user_id);
-      }
-    }
-
-    for (const [srvId, userSet] of resyncTargetsByServer) {
-      try {
-        const resyncClient = new AgentClient(srvId);
-        await resyncClient.resyncUserFirewallRules([...userSet]);
-      } catch (syncErr) {
-        console.error(`[connect] resync failed for server ${srvId}:`, syncErr.message);
       }
     }
 
@@ -381,8 +375,18 @@ router.post('/', async (req, res) => {
     );
 
     // New peer IP joined this user — ask management to refresh firewall rules referencing them.
-    try { await client.resyncUserFirewallRules([req.user.id]); }
-    catch (syncErr) { console.error(`[connect] resync failed:`, syncErr.message); }
+    // Also cover any servers where they lost peers above (maybe a different server).
+    const resyncByServer = resyncTargetsByServer;
+    if (!resyncByServer.has(server.id)) resyncByServer.set(server.id, new Set());
+    resyncByServer.get(server.id).add(req.user.id);
+    for (const [srvId, userSet] of resyncByServer) {
+      try {
+        const resyncClient = new AgentClient(srvId);
+        await resyncClient.resyncUserFirewallRules([...userSet]);
+      } catch (syncErr) {
+        console.error(`[connect] resync failed for server ${srvId}:`, syncErr.message);
+      }
+    }
 
     res.status(201).json({
       peerId: peerMeta[0].id,

@@ -189,7 +189,23 @@ async function resyncRulesWhere(serverId, predicate) {
       dstPort: rule.dstPort,
       log: rule.log,
     };
+    // Preflight: if a reference resolves to zero IPs right now (peer momentarily
+    // removed during enrollment, zone emptied, etc.) skip this group entirely.
+    // Keeping the stale rule is harmless — no packet can match a missing IP —
+    // and it avoids permanently losing the logical rule during a transient gap.
     try {
+      const srcIPs = await resolveSide(serverId, {
+        ip: body.srcIP, zoneId: body.srcZoneId, aliasId: body.srcAliasId, userId: body.srcUserId,
+      });
+      const dstIPs = await resolveSide(serverId, {
+        ip: body.dstIP, zoneId: body.dstZoneId, aliasId: body.dstAliasId, userId: body.dstUserId,
+      });
+      const srcRefMissing = (body.srcZoneId || body.srcAliasId || body.srcUserId) && srcIPs.length === 0;
+      const dstRefMissing = (body.dstZoneId || body.dstAliasId || body.dstUserId) && dstIPs.length === 0;
+      if (srcRefMissing || dstRefMissing) {
+        console.warn(`[ruleOrchestrator] skip resync for group ${rule.groupId}: referenced IP set is currently empty`);
+        continue;
+      }
       await client.firewallRemoveGroup(iface, rule.groupId);
       await createLogicalRule(serverId, iface, body);
     } catch (err) {
