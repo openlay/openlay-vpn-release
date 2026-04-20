@@ -269,13 +269,7 @@ async function rebuildChain(iface) {
     } catch {}
   }
 
-  // 1. System rules (ACCEPT critical traffic)
-  for (const rule of sysRules) {
-    const { ruleArgs } = buildArgs(iface, { ...rule, position: undefined });
-    try { await exec('iptables', ruleArgs); } catch {}
-  }
-
-  // 1b. Policy-implicit peer blocking (block_all only). Runs BEFORE user
+  // 1. Policy-implicit peer blocking (block_all only). Runs BEFORE user
   // rules so it can't be overridden by a user ACCEPT rule — if you want
   // specific peer-to-peer allowed with block_all, switch to block_wan.
   if (policy.defaultPolicy === 'block_all') {
@@ -318,6 +312,15 @@ async function rebuildChain(iface) {
     } catch (err) {
       console.error(`[firewall] Failed to apply rule ${rule.id}:`, err.message);
     }
+  }
+
+  // 3. System rules (ACCEPT DNS, VPN port, mgmt) — run AFTER user rules so
+  // a user rule can override them if they're explicit enough. These are
+  // ACCEPT fallbacks, not mandatory, so their position doesn't affect
+  // correctness of user rules that run earlier.
+  for (const rule of sysRules) {
+    const { ruleArgs } = buildArgs(iface, { ...rule, position: undefined });
+    try { await exec('iptables', ruleArgs); } catch {}
   }
 
   // 3. Default policy at end of chain (ESTABLISHED already added at step 0)
