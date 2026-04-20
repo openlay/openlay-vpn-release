@@ -220,6 +220,11 @@ async function rebuildChain(iface) {
 
   // 3. Default policy at end of chain
   if (policy.defaultPolicy === 'block_all') {
+    // Allow replies to outbound that user rules let through — otherwise
+    // an "ACCEPT src=X" rule lets packets out but the response gets dropped.
+    try {
+      await exec('iptables', ['-A', chain, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT']);
+    } catch {}
     await exec('iptables', ['-A', chain, '-j', 'DROP']);
   } else if (policy.defaultPolicy === 'block_wan') {
     // Allow peer-to-peer traffic within VPN subnets
@@ -283,19 +288,16 @@ async function getAllRules() {
 }
 
 async function addRule(iface, rule) {
-  await ensureChain(iface);
   rule = toCanonicalRule(rule);
   rule.id = rule.id || generateId();
   rule.iface = iface;
   rule.createdAt = new Date().toISOString();
 
-  const { logArgs, ruleArgs } = buildArgs(iface, rule);
-  if (logArgs) await exec('iptables', logArgs);
-  await exec('iptables', ruleArgs);
-
   const rules = await loadRules(iface);
   rules.push(rule);
   await saveRules(iface, rules);
+  // Rebuild so the new rule lands before the terminal policy DROP.
+  await rebuildChain(iface);
   return rule;
 }
 
@@ -303,21 +305,10 @@ async function removeRule(iface, ruleId) {
   const rules = await loadRules(iface);
   const idx = rules.findIndex(r => r.id === ruleId);
   if (idx === -1) throw new Error(`Rule not found: ${ruleId}`);
-  const rule = rules[idx];
-
-  try { await exec('iptables', buildDeleteArgs(iface, rule)); } catch {}
-  // Also remove log rule if it had logging
-  if (rule.log) {
-    try {
-      const chain = chainName(iface);
-      await exec('iptables', ['-t', 'filter', '-D', chain, '-j', 'LOG',
-        '--log-prefix', `${LOG_PREFIX}${rule.id}:`, '--log-level', '4',
-        '-m', 'comment', '--comment', `olv-fw-log:${rule.id}`]);
-    } catch {}
-  }
 
   rules.splice(idx, 1);
   await saveRules(iface, rules);
+  await rebuildChain(iface);
   return { ok: true };
 }
 
