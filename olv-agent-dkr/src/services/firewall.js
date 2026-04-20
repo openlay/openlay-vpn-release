@@ -259,6 +259,16 @@ async function rebuildChain(iface) {
   const mgmtIP = getManagementIP();
   const sysRules = getSystemRules(mgmtIP);
 
+  // 0. Stateful fast-path. ESTABLISHED/RELATED must run BEFORE user DROP rules
+  // so replies to allowed outbound flows always pass. Standard pattern in
+  // Cisco ACL / iptables-tutorial / pfSense — without this a rule like
+  // "DROP any → vpn-peer" would drop return traffic to those peers too.
+  if (policy.defaultPolicy !== 'allow_all') {
+    try {
+      await exec('iptables', ['-A', chain, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT']);
+    } catch {}
+  }
+
   // 1. System rules (ACCEPT critical traffic)
   for (const rule of sysRules) {
     const { ruleArgs } = buildArgs(iface, { ...rule, position: undefined });
@@ -291,13 +301,8 @@ async function rebuildChain(iface) {
     }
   }
 
-  // 3. Default policy at end of chain
+  // 3. Default policy at end of chain (ESTABLISHED already added at step 0)
   if (policy.defaultPolicy === 'block_all') {
-    // Allow replies to outbound that user rules let through — otherwise
-    // an "ACCEPT src=X" rule lets packets out but the response gets dropped.
-    try {
-      await exec('iptables', ['-A', chain, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT']);
-    } catch {}
     await exec('iptables', ['-A', chain, '-j', 'DROP']);
   } else if (policy.defaultPolicy === 'block_wan') {
     // Allow peer-to-peer traffic within VPN subnets
@@ -311,10 +316,6 @@ async function rebuildChain(iface) {
           await exec('iptables', ['-A', chain, '-s', subnet, '-d', subnet, '-j', 'ACCEPT']);
         }
       }
-    } catch {}
-    // Allow established/related (for replies to allowed outbound)
-    try {
-      await exec('iptables', ['-A', chain, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT']);
     } catch {}
     // Drop everything else (WAN traffic)
     await exec('iptables', ['-A', chain, '-j', 'DROP']);

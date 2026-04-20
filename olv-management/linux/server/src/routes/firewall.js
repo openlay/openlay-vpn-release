@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
-const { createLogicalRule, deleteLogicalRule, groupPhysicalRules, resyncRulesByUsers } = require('../services/ruleOrchestrator');
+const { createLogicalRule, deleteLogicalRule, groupPhysicalRules, resyncRulesByUsers, resyncRulesByZone, resyncRulesByAlias } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
@@ -143,6 +143,24 @@ router.post('/resync-users', async (req, res) => {
     const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
     await resyncRulesByUsers(parseInt(req.params.serverId), userIds);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/servers/:serverId/firewall/resync
+// Admin: re-expand every logical rule on this server so stale ones (created
+// before a resolver change) pick up the current IP set.
+router.post('/resync', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    await getClient(req.params.serverId, req);
+    const serverId = parseInt(req.params.serverId);
+    const { rows: zones } = await pool.query('SELECT id FROM firewall_zones WHERE server_id = $1', [serverId]);
+    for (const z of zones) await resyncRulesByZone(serverId, z.id);
+    const { rows: aliases } = await pool.query('SELECT id FROM firewall_aliases WHERE server_id = $1', [serverId]);
+    for (const a of aliases) await resyncRulesByAlias(serverId, a.id);
+    res.json({ ok: true, zonesResynced: zones.length, aliasesResynced: aliases.length });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
