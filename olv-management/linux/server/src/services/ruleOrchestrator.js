@@ -7,6 +7,24 @@ function generateGroupId() {
   return crypto.randomUUID();
 }
 
+// Priority bands enforced server-side:
+//   1-99    system rules (hardcoded, not writable from API)
+//   100-999 user rules (iOS sets, default 500)
+//   1000+   reserved for defaults/auto-services
+const USER_PRIORITY_MIN = 100;
+const USER_PRIORITY_MAX = 999;
+const DEFAULT_USER_PRIORITY = 500;
+
+function normalizePriority(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_USER_PRIORITY;
+  const n = Number(value);
+  if (!Number.isInteger(n)) throw Object.assign(new Error('priority must be an integer'), { status: 400 });
+  if (n < USER_PRIORITY_MIN || n > USER_PRIORITY_MAX) {
+    throw Object.assign(new Error(`priority must be between ${USER_PRIORITY_MIN} and ${USER_PRIORITY_MAX}`), { status: 400 });
+  }
+  return n;
+}
+
 /**
  * Create a logical rule on the agent — resolve zone/alias/user refs to IPs,
  * expand into N physical iptables rules sharing a groupId, return one logical rule.
@@ -18,6 +36,7 @@ async function createLogicalRule(serverId, iface, body) {
     srcZoneId, dstZoneId, src_zone_id, dst_zone_id,
     srcAliasId, dstAliasId, src_alias_id, dst_alias_id,
     srcUserId, dstUserId, src_user_id, dst_user_id,
+    priority,
     ...rest
   } = body;
   const side = {
@@ -30,6 +49,7 @@ async function createLogicalRule(serverId, iface, body) {
     srcUserId: srcUserId ?? src_user_id,
     dstUserId: dstUserId ?? dst_user_id,
   };
+  const normalizedPriority = normalizePriority(priority);
 
   const srcIPs = await resolveSide(serverId, { ip: side.srcIP, zoneId: side.srcZoneId, aliasId: side.srcAliasId, userId: side.srcUserId });
   const dstIPs = await resolveSide(serverId, { ip: side.dstIP, zoneId: side.dstZoneId, aliasId: side.dstAliasId, userId: side.dstUserId });
@@ -44,13 +64,19 @@ async function createLogicalRule(serverId, iface, body) {
   }
 
   const groupId = generateGroupId();
-  const metadata = { groupId };
+  const metadata = { groupId, priority: normalizedPriority };
   if (side.srcZoneId != null) metadata.srcZoneId = side.srcZoneId;
   if (side.dstZoneId != null) metadata.dstZoneId = side.dstZoneId;
   if (side.srcAliasId != null) metadata.srcAliasId = side.srcAliasId;
   if (side.dstAliasId != null) metadata.dstAliasId = side.dstAliasId;
   if (side.srcUserId) metadata.srcUserId = side.srcUserId;
   if (side.dstUserId) metadata.dstUserId = side.dstUserId;
+
+  // wan zone means "not in VPN subnets" — emit an exclusion list agent uses
+  // to add negated -d/-s matches when building iptables.
+  const wanExcludes = await collectWanExcludes(serverId, side);
+  if (wanExcludes.srcExcludeCIDRs) metadata.srcExcludeCIDRs = wanExcludes.srcExcludeCIDRs;
+  if (wanExcludes.dstExcludeCIDRs) metadata.dstExcludeCIDRs = wanExcludes.dstExcludeCIDRs;
 
   const client = new AgentClient(serverId);
   const physical = [];
@@ -65,6 +91,33 @@ async function createLogicalRule(serverId, iface, body) {
   }
 
   return buildLogicalRule(physical, { groupId, ...metadata, iface, ...rest });
+}
+
+// If src or dst references the built-in "wan" zone, collect the VPN subnets on
+// this server as an exclusion list. The agent uses these to add negated `! -d`
+// (or `! -s`) matches so "wan" literally means "everywhere except VPN".
+async function collectWanExcludes(serverId, side) {
+  const out = {};
+  const check = async (zoneId) => {
+    if (zoneId == null) return null;
+    const { rows } = await pool.query(
+      'SELECT name FROM firewall_zones WHERE id = $1 AND server_id = $2',
+      [zoneId, serverId]
+    );
+    return rows[0]?.name || null;
+  };
+  const srcZoneName = await check(side.srcZoneId);
+  const dstZoneName = await check(side.dstZoneId);
+  if (srcZoneName !== 'wan' && dstZoneName !== 'wan') return out;
+  const { rows: subs } = await pool.query(
+    'SELECT DISTINCT cidr FROM subnets WHERE server_id = $1',
+    [serverId]
+  );
+  const cidrs = [...new Set(subs.map(r => r.cidr).filter(Boolean))];
+  if (cidrs.length === 0) return out;
+  if (srcZoneName === 'wan') out.srcExcludeCIDRs = cidrs;
+  if (dstZoneName === 'wan') out.dstExcludeCIDRs = cidrs;
+  return out;
 }
 
 /**
@@ -118,6 +171,7 @@ function buildLogicalRule(members, base) {
     log: first.log || base.log,
     system: first.system || base.system,
     createdAt: first.createdAt || base.createdAt,
+    priority: first.priority ?? base.priority ?? null,
     srcIP: srcIPs.length === 1 ? srcIPs[0] : (srcIPs[0] || null),
     dstIP: dstIPs.length === 1 ? dstIPs[0] : (dstIPs[0] || null),
     srcZoneId: first.srcZoneId ?? base.srcZoneId ?? null,
@@ -188,6 +242,7 @@ async function resyncRulesWhere(serverId, predicate) {
       srcPort: rule.srcPort,
       dstPort: rule.dstPort,
       log: rule.log,
+      priority: rule.priority,
     };
     // Preflight: if a reference resolves to zero IPs right now (peer momentarily
     // removed during enrollment, zone emptied, etc.) skip this group entirely.

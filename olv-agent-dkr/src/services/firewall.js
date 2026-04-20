@@ -36,8 +36,15 @@ function toCanonicalRule(rule) {
   assignIfDefined('srcPort', rule.srcPort ?? src_port);
   assignIfDefined('dstPort', rule.dstPort ?? dst_port);
   assignIfDefined('protocol', rule.protocol ?? proto);
+  // Default priority for user rules when unset (iOS < rollout will omit it).
+  if (canonical.priority === undefined || canonical.priority === null) {
+    canonical.priority = DEFAULT_USER_PRIORITY;
+  }
   return canonical;
 }
+
+// Priority bands: sys (1-99) < user (100-999) < defaults (1000-1999) < auto-services (2000-9999).
+const DEFAULT_USER_PRIORITY = 500;
 
 async function saveRules(iface, rules) {
   await fs.writeFile(rulesPath(iface), JSON.stringify(rules, null, 2));
@@ -72,6 +79,19 @@ async function ensureChain(iface) {
 
 async function flushChain(iface) {
   try { await exec('iptables', ['-F', chainName(iface)]); } catch {}
+  // Also remove per-rule exclude helper chains (OLV-EX-<iface>-*) since they're
+  // rebuilt from scratch on each rebuildChain.
+  try {
+    const { stdout } = await exec('iptables', ['-S']);
+    const prefix = `OLV-EX-${iface}-`;
+    const helpers = (stdout || '').split('\n')
+      .filter(l => l.startsWith(`-N ${prefix}`))
+      .map(l => l.replace(/^-N\s+/, '').trim());
+    for (const h of helpers) {
+      try { await exec('iptables', ['-F', h]); } catch {}
+      try { await exec('iptables', ['-X', h]); } catch {}
+    }
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -128,14 +148,54 @@ function buildArgs(iface, rule) {
     const logArgs = [...args];
     logArgs.push('-j', 'LOG', '--log-prefix', `${LOG_PREFIX}${rule.id || 'match'}:`, '--log-level', '4');
     if (rule.id) logArgs.push('-m', 'comment', '--comment', `olv-fw-log:${rule.id}`);
-    return { logArgs, ruleArgs: buildMainArgs(args, rule) };
+    return { logArgs, ruleArgs: buildMainArgs(args, rule, iface), excludeSetup: buildExcludeSetup(iface, rule) };
   }
 
-  return { logArgs: null, ruleArgs: buildMainArgs(args, rule) };
+  return { logArgs: null, ruleArgs: buildMainArgs(args, rule, iface), excludeSetup: buildExcludeSetup(iface, rule) };
 }
 
-function buildMainArgs(args, rule) {
-  args.push('-j', rule.target || 'DROP');
+// Name for the per-rule helper chain used when a rule needs negated CIDR
+// matches ("wan" zone = everywhere except VPN subnets). Keep it short —
+// iptables chain names max out at 28 chars.
+function excludeChainName(iface, ruleId) {
+  const shortId = (ruleId || 'x').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
+  return `OLV-EX-${iface}-${shortId}`;
+}
+
+function hasExcludes(rule) {
+  return (rule.srcExcludeCIDRs && rule.srcExcludeCIDRs.length > 0)
+      || (rule.dstExcludeCIDRs && rule.dstExcludeCIDRs.length > 0);
+}
+
+// Commands to (re)create the helper chain for a rule with excludes:
+//   chain contents: `-s <vpn> -j RETURN`, `-d <vpn> -j RETURN`, final `-j TARGET`
+// Return-from-subchain resumes processing in the parent chain, so an excluded
+// packet falls through to the next rule instead of taking this rule's target.
+function buildExcludeSetup(iface, rule) {
+  if (!hasExcludes(rule)) return null;
+  const chain = excludeChainName(iface, rule.id);
+  const commands = [
+    ['-N', chain],
+    ['-F', chain],
+  ];
+  for (const cidr of (rule.srcExcludeCIDRs || [])) {
+    commands.push(['-A', chain, '-s', cidr, '-j', 'RETURN']);
+  }
+  for (const cidr of (rule.dstExcludeCIDRs || [])) {
+    commands.push(['-A', chain, '-d', cidr, '-j', 'RETURN']);
+  }
+  commands.push(['-A', chain, '-j', rule.target || 'DROP']);
+  return { chain, commands };
+}
+
+function buildMainArgs(args, rule, iface) {
+  // When excludes exist, the rule jumps to the helper chain instead of taking
+  // the target directly; the helper chain applies the target after filtering.
+  if (hasExcludes(rule) && iface) {
+    args.push('-j', excludeChainName(iface, rule.id));
+  } else {
+    args.push('-j', rule.target || 'DROP');
+  }
   if (rule.id) args.push('-m', 'comment', '--comment', `olv-fw:${rule.id}`);
   return args;
 }
@@ -205,12 +265,25 @@ async function rebuildChain(iface) {
     try { await exec('iptables', ruleArgs); } catch {}
   }
 
-  // 2. User rules
+  // 2. User rules — sorted by priority (lower = applied first), createdAt tie-break
   const userRules = await loadRules(iface);
-  for (const rule of userRules) {
+  const sorted = [...userRules].sort((a, b) => {
+    const pa = a.priority ?? DEFAULT_USER_PRIORITY;
+    const pb = b.priority ?? DEFAULT_USER_PRIORITY;
+    if (pa !== pb) return pa - pb;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
+  });
+  for (const rule of sorted) {
     if (rule.type === 'rate-limit') continue;
     try {
-      const { logArgs, ruleArgs } = buildArgs(iface, rule);
+      const { logArgs, ruleArgs, excludeSetup } = buildArgs(iface, rule);
+      // Create helper chain first (for wan-style excludes) so the main rule
+      // has something to jump to.
+      if (excludeSetup) {
+        for (const cmd of excludeSetup.commands) {
+          try { await exec('iptables', cmd); } catch { /* -N may fail if chain exists; -F clears it */ }
+        }
+      }
       if (logArgs) await exec('iptables', logArgs);
       await exec('iptables', ruleArgs);
     } catch (err) {
