@@ -280,6 +280,12 @@ const handlers = {
     return result;
   },
 
+  async firewallRemoveGroup({ iface, groupId }) {
+    const result = await firewall.removeRulesByGroup(iface, groupId);
+    audit.log('firewallRemoveGroup', { iface, groupId, removed: result.removed });
+    return result;
+  },
+
   async firewallFlushRules({ iface }) {
     const result = await firewall.flushRules(iface);
     audit.log('firewallFlushRules', { iface });

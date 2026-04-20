@@ -3,6 +3,7 @@ const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { generateKeyPair, generatePresharedKey } = require('../services/keygen');
 const { buildClientConfig } = require('../services/configBuilder');
+const { resyncRulesByUsers } = require('../services/ruleOrchestrator');
 
 const enterpriseContext = require('../middleware/enterpriseContext');
 
@@ -275,6 +276,13 @@ router.delete('/:pubkey', async (req, res) => {
     const { client } = await getClientAndServer(req.params.serverId, req);
     const pubkey = decodeURIComponent(req.params.pubkey);
 
+    // Capture user_id BEFORE deletion so we can resync their firewall rules.
+    const { rows: ownerRows } = await pool.query(
+      'SELECT user_id FROM peers_meta WHERE server_id = $1 AND interface_name = $2 AND public_key = $3',
+      [req.params.serverId, req.params.iface, pubkey]
+    );
+    const affectedUserId = ownerRows[0]?.user_id || null;
+
     await client.removePeer(req.params.iface, pubkey);
 
     // Clean up local metadata
@@ -282,6 +290,11 @@ router.delete('/:pubkey', async (req, res) => {
       'DELETE FROM peers_meta WHERE server_id = $1 AND interface_name = $2 AND public_key = $3',
       [req.params.serverId, req.params.iface, pubkey]
     );
+
+    if (affectedUserId) {
+      try { await resyncRulesByUsers(parseInt(req.params.serverId), [affectedUserId]); }
+      catch (syncErr) { console.error(`[peers] resync failed:`, syncErr.message); }
+    }
 
     res.json({ removed: true });
   } catch (err) {

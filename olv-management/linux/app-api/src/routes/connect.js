@@ -265,12 +265,26 @@ router.post('/', async (req, res) => {
       [device.id]
     );
 
+    const resyncTargetsByServer = new Map();
     for (const oldPeer of existingPeers) {
       try {
         const oldClient = new AgentClient(oldPeer.server_id);
         await oldClient.removePeer(oldPeer.interface_name, oldPeer.public_key);
       } catch { /* agent may be unreachable, continue anyway */ }
       await pool.query('DELETE FROM peers_meta WHERE id = $1', [oldPeer.id]);
+      if (oldPeer.user_id) {
+        if (!resyncTargetsByServer.has(oldPeer.server_id)) resyncTargetsByServer.set(oldPeer.server_id, new Set());
+        resyncTargetsByServer.get(oldPeer.server_id).add(oldPeer.user_id);
+      }
+    }
+
+    for (const [srvId, userSet] of resyncTargetsByServer) {
+      try {
+        const resyncClient = new AgentClient(srvId);
+        await resyncClient.resyncUserFirewallRules([...userSet]);
+      } catch (syncErr) {
+        console.error(`[connect] resync failed for server ${srvId}:`, syncErr.message);
+      }
     }
 
     // Resolve server/interface/subnet
@@ -365,6 +379,10 @@ router.post('/', async (req, res) => {
        RETURNING id`,
       [server.id, interfaceName, wgPublicKey, subnetId, alias, device.id, req.user.id]
     );
+
+    // New peer IP joined this user — ask management to refresh firewall rules referencing them.
+    try { await client.resyncUserFirewallRules([req.user.id]); }
+    catch (syncErr) { console.error(`[connect] resync failed:`, syncErr.message); }
 
     res.status(201).json({
       peerId: peerMeta[0].id,

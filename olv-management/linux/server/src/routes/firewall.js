@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
+const { createLogicalRule, deleteLogicalRule, groupPhysicalRules, resyncRulesByUsers } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
@@ -58,7 +59,13 @@ router.get('/all', async (req, res) => {
   try {
     const client = await getClient(req.params.serverId, req);
     const result = await client.firewallGetAllRules();
-    res.json(result);
+    // Group user rules by groupId so iOS sees 1 logical rule per "ACCEPT src=UserA" choice,
+    // regardless of how many physical iptables entries it expanded to.
+    const grouped = {};
+    for (const [iface, rules] of Object.entries(result.interfaces || {})) {
+      grouped[iface] = groupPhysicalRules(rules);
+    }
+    res.json({ ...result, interfaces: grouped });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -84,7 +91,7 @@ router.get('/:iface/rules', async (req, res) => {
   try {
     const client = await getClient(req.params.serverId, req);
     const result = await client.firewallGetRules(req.params.iface);
-    res.json(result);
+    res.json({ ...result, user: groupPhysicalRules(result.user || []) });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -105,21 +112,37 @@ router.get('/:iface/live', async (req, res) => {
 router.post('/:iface/rules', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const client = await getClient(req.params.serverId, req);
-    const result = await client.firewallAddRule(req.params.iface, req.body);
-    res.status(201).json(result);
+    await getClient(req.params.serverId, req); // enforce access
+    const logical = await createLogicalRule(parseInt(req.params.serverId), req.params.iface, req.body);
+    res.status(201).json(logical);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 // DELETE /api/servers/:serverId/firewall/:iface/rules/:ruleId
+// ruleId may be a logical groupId (delete all members) or a raw physical rule id.
 router.delete('/:iface/rules/:ruleId', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const client = await getClient(req.params.serverId, req);
-    const result = await client.firewallRemoveRule(req.params.iface, req.params.ruleId);
+    await getClient(req.params.serverId, req);
+    const result = await deleteLogicalRule(parseInt(req.params.serverId), req.params.iface, req.params.ruleId);
     res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/servers/:serverId/firewall/resync-users
+// Internal hook: re-expand rules that reference the given user IDs.
+// Called by peer/device/static-IP mutation paths so iptables tracks the current IP set.
+router.post('/resync-users', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    await getClient(req.params.serverId, req);
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
+    await resyncRulesByUsers(parseInt(req.params.serverId), userIds);
+    res.json({ ok: true });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

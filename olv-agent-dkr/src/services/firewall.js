@@ -312,6 +312,17 @@ async function removeRule(iface, ruleId) {
   return { ok: true };
 }
 
+async function removeRulesByGroup(iface, groupId) {
+  if (!groupId) throw new Error('groupId is required');
+  const rules = await loadRules(iface);
+  const remaining = rules.filter(r => r.groupId !== groupId);
+  const removed = rules.length - remaining.length;
+  if (removed === 0) return { ok: true, removed: 0 };
+  await saveRules(iface, remaining);
+  await rebuildChain(iface);
+  return { ok: true, removed };
+}
+
 async function flushRules(iface) {
   await flushChain(iface);
   await saveRules(iface, []);
@@ -465,7 +476,7 @@ async function restoreAll() {
 module.exports = {
   getPolicy, setPolicy,
   getRules, getAllRules,
-  addRule, removeRule, flushRules,
+  addRule, removeRule, removeRulesByGroup, flushRules,
   blockIP, allowIP, blockPort, allowPort, blockPeer,
   rateLimitPeer,
   listLiveRules, getLogs,

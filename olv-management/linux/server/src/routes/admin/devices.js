@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
+const { resyncRulesByUsers } = require('../../services/ruleOrchestrator');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -272,6 +273,7 @@ router.post('/:id/static-ips', async (req, res) => {
       `INSERT INTO device_static_ips (device_id, server_id, subnet_id, ip_address, allowed_ips) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [req.params.id, server_id, subnet_id, normalizedIp, allowed_ips.map(c => c.trim())]
     );
+    await triggerStaticIpResync(server_id, req.params.id);
     res.status(201).json({ staticIp: rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Static IP already assigned' });
@@ -299,6 +301,7 @@ router.put('/:id/static-ips/:sipId', async (req, res) => {
       [normalizedIp, allowed_ips.map(c => c.trim()), req.params.sipId, req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Static IP not found' });
+    await triggerStaticIpResync(rows[0].server_id, req.params.id);
     res.json({ staticIp: rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'IP address conflict' });
@@ -312,16 +315,33 @@ router.delete('/:id/static-ips/:sipId', async (req, res) => {
     if (!(await verifyDeviceAccess(req.params.id, req))) {
       return res.status(404).json({ error: 'Device not found' });
     }
+    const { rows: existing } = await pool.query(
+      'SELECT server_id FROM device_static_ips WHERE id = $1 AND device_id = $2',
+      [req.params.sipId, req.params.id]
+    );
     const { rowCount } = await pool.query(
       'DELETE FROM device_static_ips WHERE id = $1 AND device_id = $2',
       [req.params.sipId, req.params.id]
     );
     if (rowCount === 0) return res.status(404).json({ error: 'Static IP not found' });
+    if (existing[0]) await triggerStaticIpResync(existing[0].server_id, req.params.id);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Look up which user owns the given device and ask ruleOrchestrator to refresh
+// any firewall rules that reference them.
+async function triggerStaticIpResync(serverId, deviceId) {
+  try {
+    const { rows } = await pool.query('SELECT user_id FROM devices WHERE id = $1', [deviceId]);
+    const userId = rows[0]?.user_id;
+    if (userId) await resyncRulesByUsers(parseInt(serverId), [userId]);
+  } catch (err) {
+    console.error(`[admin/devices] static-ip resync failed:`, err.message);
+  }
+}
 
 // DELETE /api/admin/devices/:id
 router.delete('/:id', async (req, res) => {

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
+const { resyncRulesByZone } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
@@ -137,12 +138,9 @@ async function resolveZone(serverId, zoneId) {
 // ---------------------------------------------------------------------------
 
 async function syncZoneRulesToAgent(serverId, zoneId) {
-  // Find all firewall rules that reference this zone
-  // For now, zones are resolved at rule-creation time.
-  // Future: store zone references in rules and re-resolve on member change.
-  // Current approach: rebuild all chains (simple but effective)
-  const client = new AgentClient(serverId);
-  await client.firewallSetPolicy((await client.firewallGetPolicy()).defaultPolicy);
+  // Re-expand every logical rule that references this zone so IP membership changes
+  // propagate to iptables.
+  await resyncRulesByZone(serverId, zoneId);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,12 +211,34 @@ router.delete('/:zoneId', async (req, res) => {
     const { rows } = await pool.query('SELECT builtin FROM firewall_zones WHERE id = $1 AND server_id = $2', [req.params.zoneId, req.params.serverId]);
     if (rows.length === 0) return res.status(404).json({ error: 'Zone not found' });
     if (rows[0].builtin) return res.status(400).json({ error: 'Cannot delete built-in zone' });
+
+    // Drop agent rules referencing this zone before DB delete so we don't orphan
+    // rules that can no longer be resolved.
+    const zoneId = parseInt(req.params.zoneId);
+    await removeRulesReferencingZone(parseInt(req.params.serverId), zoneId);
+
     await pool.query('DELETE FROM firewall_zones WHERE id = $1', [req.params.zoneId]);
     res.json({ deleted: true });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
+
+async function removeRulesReferencingZone(serverId, zoneId) {
+  const client = new AgentClient(serverId);
+  const all = await client.firewallListAllRules();
+  const seen = new Set();
+  for (const [iface, rules] of Object.entries(all.interfaces || {})) {
+    for (const rule of rules) {
+      if (!rule.groupId) continue;
+      if (rule.srcZoneId != zoneId && rule.dstZoneId != zoneId) continue;
+      const key = `${iface}::${rule.groupId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try { await client.firewallRemoveGroup(iface, rule.groupId); } catch {}
+    }
+  }
+}
 
 // POST /api/servers/:serverId/firewall/zones/:zoneId/members
 router.post('/:zoneId/members', async (req, res) => {

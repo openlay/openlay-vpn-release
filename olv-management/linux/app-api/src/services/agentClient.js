@@ -50,6 +50,11 @@ class AgentClient {
   }
   getStatus(iface) { return this.request('GET', `/status/${encodeURIComponent(iface)}`); }
   getHandshakes(iface) { return this.request('GET', `/status/${encodeURIComponent(iface)}/handshakes`); }
+  // Ask management to re-expand firewall rules whose src/dst reference these users,
+  // because their peer IP set just changed.
+  resyncUserFirewallRules(userIds) {
+    return this.request('POST', `/firewall/resync-users`, { userIds });
+  }
 }
 
 module.exports = AgentClient;

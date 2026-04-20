@@ -63,6 +63,8 @@ class AgentClient {
   firewallGetLogs(filter) { return this.request('firewallGetLogs', filter || {}, 15000); }
   firewallAddRule(iface, rule) { return this.request('firewallAddRule', { iface, rule }); }
   firewallRemoveRule(iface, ruleId) { return this.request('firewallRemoveRule', { iface, ruleId }); }
+  firewallRemoveGroup(iface, groupId) { return this.request('firewallRemoveGroup', { iface, groupId }); }
+  firewallListAllRules() { return this.request('firewallGetAllRules'); }
   firewallFlushRules(iface) { return this.request('firewallFlushRules', { iface }); }
   firewallBlockIP(iface, ip, direction) { return this.request('firewallBlockIP', { iface, ip, direction }); }
   firewallAllowIP(iface, ip, direction) { return this.request('firewallAllowIP', { iface, ip, direction }); }

@@ -1,5 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
+const AgentClient = require('../services/agentClient');
+const { resyncRulesByAlias } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
@@ -76,6 +78,11 @@ router.put('/:aliasId', async (req, res) => {
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Alias not found' });
+    // Resync rules when the addresses array changed so iptables reflects the new list.
+    if (addresses !== undefined) {
+      try { await resyncRulesByAlias(parseInt(req.params.serverId), parseInt(req.params.aliasId)); }
+      catch (syncErr) { console.error(`[alias] resync failed:`, syncErr.message); }
+    }
     res.json(rows[0]);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -87,6 +94,8 @@ router.delete('/:aliasId', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
     await verifyAccess(req.params.serverId, req);
+    // Drop agent rules referencing this alias before DB delete to avoid orphans.
+    await removeRulesReferencingAlias(parseInt(req.params.serverId), parseInt(req.params.aliasId));
     const { rowCount } = await pool.query(
       'DELETE FROM firewall_aliases WHERE id = $1 AND server_id = $2',
       [req.params.aliasId, req.params.serverId]
@@ -97,5 +106,21 @@ router.delete('/:aliasId', async (req, res) => {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
+
+async function removeRulesReferencingAlias(serverId, aliasId) {
+  const client = new AgentClient(serverId);
+  const all = await client.firewallListAllRules();
+  const seen = new Set();
+  for (const [iface, rules] of Object.entries(all.interfaces || {})) {
+    for (const rule of rules) {
+      if (!rule.groupId) continue;
+      if (rule.srcAliasId != aliasId && rule.dstAliasId != aliasId) continue;
+      const key = `${iface}::${rule.groupId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try { await client.firewallRemoveGroup(iface, rule.groupId); } catch {}
+    }
+  }
+}
 
 module.exports = router;
