@@ -33,6 +33,100 @@ const APPLE_JWKS = createRemoteJWKSet(
   new URL('https://appleid.apple.com/auth/keys')
 );
 
+// --- Token pair helpers -----------------------------------------------------
+
+// Issue an access JWT + a fresh refresh token persisted in auth_sessions.
+// Caller supplies userId and (optionally) deviceId — deviceId is only set
+// once the client has registered a Secure Enclave key. Returns the plain
+// refresh token so the caller can deliver it to the client; the DB only
+// stores its hash.
+async function issueTokenPair(user, deviceId, opts = {}) {
+  const sessionId = crypto.randomUUID();
+  const refreshToken = crypto.randomBytes(32).toString('hex');
+  const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+  const now = Date.now();
+  const accessExpires = new Date(now + config.sessionTtlHours * 3600 * 1000);
+  const refreshExpires = new Date(now + config.loginTtlDays * 24 * 3600 * 1000);
+
+  await pool.query(
+    `INSERT INTO auth_sessions
+       (id, user_id, device_id, refresh_token_hash, expires_at, user_agent)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [sessionId, user.id, deviceId || null, refreshHash, refreshExpires, opts.userAgent || null]
+  );
+
+  const accessToken = jwt.sign(
+    { sub: user.id, email: user.email, status: user.status, typ: 'access', sid: sessionId },
+    config.jwtSecret,
+    { expiresIn: `${config.sessionTtlHours}h` }
+  );
+
+  return {
+    accessToken,
+    refreshToken,
+    accessExpiresAt: accessExpires.toISOString(),
+    refreshExpiresAt: refreshExpires.toISOString(),
+    sessionId,
+  };
+}
+
+// Re-issue an access token for an existing session (refresh flow). Does NOT
+// rotate the refresh token — rotation can be added later when we need
+// linkable session audit trails or want to cap refresh lifetime absolutely.
+async function reissueAccessToken(sessionRow, user) {
+  const accessExpires = new Date(Date.now() + config.sessionTtlHours * 3600 * 1000);
+  const accessToken = jwt.sign(
+    { sub: user.id, email: user.email, status: user.status, typ: 'access', sid: sessionRow.id },
+    config.jwtSecret,
+    { expiresIn: `${config.sessionTtlHours}h` }
+  );
+  await pool.query('UPDATE auth_sessions SET last_used_at = NOW() WHERE id = $1', [sessionRow.id]);
+  return { accessToken, accessExpiresAt: accessExpires.toISOString() };
+}
+
+function hashRefresh(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Build the canonical challenge payload the client signs when refreshing.
+// Keep it tiny + deterministic — JSON.stringify with sorted keys, UTF-8.
+// The server reconstructs the same payload and runs SecKeyVerifySignature
+// against the device's stored SE public key.
+function canonicalChallenge({ refreshTokenHash, nonce, timestamp }) {
+  return JSON.stringify({ nonce, refreshTokenHash, timestamp });
+}
+
+// Verify an ECDSA P-256 signature produced by the device's Secure Enclave
+// against a base64-encoded SPKI/X.963 public key. iOS SE exports with
+// `SecKeyCopyExternalRepresentation` which returns the X9.63-formatted
+// uncompressed point (0x04 ∥ X ∥ Y, 65 bytes). Node's crypto wants SPKI;
+// we convert by wrapping with the P-256 SubjectPublicKeyInfo prefix.
+function verifyDeviceSignature(publicKeyBase64, challengeText, signatureBase64) {
+  try {
+    const raw = Buffer.from(publicKeyBase64, 'base64');
+    if (raw.length !== 65 || raw[0] !== 0x04) return false; // not uncompressed P-256
+    // P-256 SPKI prefix for 04||X||Y uncompressed key
+    const spkiPrefix = Buffer.from(
+      '3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'
+    );
+    const spki = Buffer.concat([spkiPrefix, raw]);
+    const pubKey = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    // SE produces DER-encoded ECDSA signature; Node verifies DER by default.
+    return crypto.verify(
+      'sha256',
+      Buffer.from(challengeText, 'utf8'),
+      pubKey,
+      Buffer.from(signatureBase64, 'base64')
+    );
+  } catch (err) {
+    console.warn('[auth/refresh] signature verify error:', err.message);
+    return false;
+  }
+}
+
+const CHALLENGE_TTL_SEC = 300; // 5 min — tight enough to thwart replay.
+
 // POST /api/auth/apple — Verify Apple identity token, upsert user, return JWT
 router.post('/apple', async (req, res) => {
   try {
@@ -79,12 +173,9 @@ router.post('/apple', async (req, res) => {
       [user.id]
     );
 
-    // Sign JWT (30 day expiry)
-    const token = jwt.sign(
-      { sub: user.id, email: user.email, status: user.status },
-      config.jwtSecret,
-      { expiresIn: '30d' }
-    );
+    // Issue paired tokens — refresh token bound to this session, access token
+    // for immediate API calls.
+    const pair = await issueTokenPair(user, null, { userAgent: req.headers['user-agent'] });
 
     // Load workspaces per enterprise
     const enterprises = await loadEnterprisesWithUserGroups(user.id, entResult.rows);
@@ -94,7 +185,14 @@ router.post('/apple', async (req, res) => {
     const isRoot = rootCheck.rows.length > 0;
 
     res.json({
-      token,
+      // Legacy field — older clients keep reading `token`. Remove once all
+      // clients are updated to use accessToken/refreshToken explicitly.
+      token: pair.accessToken,
+      accessToken: pair.accessToken,
+      refreshToken: pair.refreshToken,
+      accessExpiresAt: pair.accessExpiresAt,
+      refreshExpiresAt: pair.refreshExpiresAt,
+      sessionId: pair.sessionId,
       user: {
         id: user.id,
         email: user.email,
@@ -107,6 +205,88 @@ router.post('/apple', async (req, res) => {
   } catch (err) {
     console.error('[auth/apple] Error:', err.message);
     res.status(401).json({ error: 'Invalid identity token: ' + err.message });
+  }
+});
+
+// POST /api/auth/refresh — Exchange a refresh token (+ SE signature proving
+// possession of the device key) for a new access token. Body:
+//   { refreshToken, challenge: { nonce, timestamp, refreshTokenHash }, signature }
+// The challenge is signed client-side with the Secure Enclave private key;
+// the server verifies against the device's stored SE public key.
+router.post('/refresh', async (req, res) => {
+  try {
+    const refreshToken = req.body.refreshToken || req.body.refresh_token;
+    const challenge = req.body.challenge || {};
+    const signature = req.body.signature;
+    if (!refreshToken || !signature || !challenge.nonce || !challenge.timestamp) {
+      return res.status(400).json({ error: 'refreshToken, challenge (nonce+timestamp), and signature are required' });
+    }
+
+    // Clock-skew guard against replay.
+    const tsMs = new Date(challenge.timestamp).getTime();
+    if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > CHALLENGE_TTL_SEC * 1000) {
+      return res.status(401).json({ error: 'Challenge timestamp out of range' });
+    }
+
+    const refreshHash = hashRefresh(refreshToken);
+    if (challenge.refreshTokenHash && challenge.refreshTokenHash !== refreshHash) {
+      return res.status(401).json({ error: 'Challenge/refresh token mismatch' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT s.*, u.id AS uid, u.email, u.status, u.name, d.public_key AS device_public_key
+       FROM auth_sessions s
+       JOIN users u ON u.id = s.user_id
+       LEFT JOIN devices d ON d.id = s.device_id
+       WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > NOW()`,
+      [refreshHash]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Refresh token invalid or expired' });
+    }
+    const session = rows[0];
+    if (session.status !== 'enabled') {
+      return res.status(403).json({ error: 'Account is disabled' });
+    }
+    if (!session.device_public_key) {
+      // No SE key registered for this device row — we can't verify PoP, so
+      // reject. This also prevents a refresh token leaked via channel X from
+      // being usable on a different device.
+      return res.status(401).json({ error: 'Device not bound to this session' });
+    }
+
+    const challengeText = canonicalChallenge({
+      refreshTokenHash: refreshHash,
+      nonce: challenge.nonce,
+      timestamp: challenge.timestamp,
+    });
+    if (!verifyDeviceSignature(session.device_public_key, challengeText, signature)) {
+      return res.status(401).json({ error: 'Invalid device signature' });
+    }
+
+    const user = { id: session.uid, email: session.email, status: session.status };
+    const pair = await reissueAccessToken(session, user);
+    res.json(pair);
+  } catch (err) {
+    console.error('[auth/refresh] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/auth/session — Revoke the current session (logout). Accepts
+// the access token via Authorization header; looks up the session via the
+// `sid` claim and marks it revoked.
+router.delete('/session', jwtAuth, async (req, res) => {
+  try {
+    if (req.user.sessionId) {
+      await pool.query(
+        'UPDATE auth_sessions SET revoked_at = NOW() WHERE id = $1 AND user_id = $2',
+        [req.user.sessionId, req.user.id]
+      );
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -170,6 +350,7 @@ router.post('/login', async (req, res) => {
 
     // Auto-enroll device for password users (first login locks device)
     // 1 user = 1 device, but 1 device can have multiple users
+    let enrolledDeviceId = user.locked_device_id || null;
     if (deviceId && !user.locked_device_id) {
       const entRow = await pool.query(
         'SELECT enterprise_id FROM user_enterprise_roles WHERE user_id = $1 LIMIT 1',
@@ -182,7 +363,6 @@ router.post('/login', async (req, res) => {
         [deviceId, user.id]
       );
 
-      let enrolledDeviceId;
       if (existing.rows.length > 0) {
         enrolledDeviceId = existing.rows[0].id;
         await pool.query(
@@ -214,14 +394,15 @@ router.post('/login', async (req, res) => {
     const enterprises = await loadEnterprisesWithUserGroups(user.id, entResult.rows);
     const rootCheck = await pool.query('SELECT 1 FROM root_users WHERE user_id = $1', [user.id]);
 
-    const token = jwt.sign(
-      { sub: user.id, email: user.email, status: user.status },
-      config.jwtSecret,
-      { expiresIn: '30d' }
-    );
+    const pair = await issueTokenPair(user, enrolledDeviceId, { userAgent: req.headers['user-agent'] });
 
     res.json({
-      token,
+      token: pair.accessToken, // legacy
+      accessToken: pair.accessToken,
+      refreshToken: pair.refreshToken,
+      accessExpiresAt: pair.accessExpiresAt,
+      refreshExpiresAt: pair.refreshExpiresAt,
+      sessionId: pair.sessionId,
       user: {
         id: user.id, email: user.email, name: user.name,
         username: user.username, status: user.status,
