@@ -275,7 +275,9 @@ router.post('/refresh', async (req, res) => {
 
 // DELETE /api/auth/session — Revoke the current session (logout). Accepts
 // the access token via Authorization header; looks up the session via the
-// `sid` claim and marks it revoked.
+// `sid` claim and marks it revoked. Also punches the session out of the
+// jwtAuth in-memory cache so the revoke takes effect immediately rather
+// than waiting for the ~30s cache TTL.
 router.delete('/session', jwtAuth, async (req, res) => {
   try {
     if (req.user.sessionId) {
@@ -283,6 +285,7 @@ router.delete('/session', jwtAuth, async (req, res) => {
         'UPDATE auth_sessions SET revoked_at = NOW() WHERE id = $1 AND user_id = $2',
         [req.user.sessionId, req.user.id]
       );
+      jwtAuth.invalidateSession(req.user.sessionId);
     }
     res.json({ ok: true });
   } catch (err) {
