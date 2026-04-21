@@ -269,26 +269,9 @@ async function rebuildChain(iface) {
     } catch {}
   }
 
-  // 1. Policy-implicit peer blocking (block_all only). Runs BEFORE user
-  // rules so it can't be overridden by a user ACCEPT rule — if you want
-  // specific peer-to-peer allowed with block_all, switch to block_wan.
-  if (policy.defaultPolicy === 'block_all') {
-    try {
-      const confFile = await fs.readFile(path.join(confDir, `${iface}.conf`), 'utf8');
-      const addrMatch = confFile.match(/Address\s*=\s*(.+)/);
-      if (addrMatch) {
-        const subnets = new Set(
-          addrMatch[1].split(',').map(a => a.trim()).map(a => a.replace(/\.\d+\//, '.0/'))
-        );
-        for (const subnet of subnets) {
-          await exec('iptables', ['-A', chain, '-d', subnet, '-j', 'DROP',
-            '-m', 'comment', '--comment', 'olv-fw:policy-block-peer']);
-        }
-      }
-    } catch {}
-  }
-
-  // 2. User rules — sorted by priority (lower = applied first), createdAt tie-break
+  // 1. User rules — sorted by priority (lower = applied first), createdAt tie-break
+  // User ACCEPT rules run BEFORE sys rules and catch-all DROP, so a user whitelist
+  // under block_all policy is effective (standard default-deny semantics).
   const userRules = await loadRules(iface);
   const sorted = [...userRules].sort((a, b) => {
     const pa = a.priority ?? DEFAULT_USER_PRIORITY;
