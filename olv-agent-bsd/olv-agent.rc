@@ -1,0 +1,28 @@
+#!/bin/sh
+# PROVIDE: olv_agent
+# REQUIRE: NETWORKING DAEMON pf
+# KEYWORD: shutdown
+#
+# rc.d service for the OpenLay VPN agent.
+#
+# To enable:   sysrc olv_agent_enable=YES
+# To start:    service olv-agent start
+# Config at:   /usr/local/etc/olv-agent/agent.conf
+
+. /etc/rc.subr
+
+name="olv_agent"
+desc="OpenLay VPN agent"
+rcvar="olv_agent_enable"
+
+load_rc_config $name
+: ${olv_agent_enable:=NO}
+: ${olv_agent_config:=/usr/local/etc/olv-agent/agent.conf}
+: ${olv_agent_user:=root}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+procname="/usr/local/sbin/olv-agent"
+command_args="-p ${pidfile} -f -o /var/log/olv-agent.log ${procname} -config ${olv_agent_config}"
+
+run_rc_command "$1"

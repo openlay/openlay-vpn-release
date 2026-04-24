@@ -1,0 +1,26 @@
+# /usr/local/etc/olv-agent/agent.conf
+# Shell-style KEY=VALUE. Read by the agent at startup; values can be
+# overridden by setting the same name as a real env var.
+
+# Upstream management server (required).
+MANAGEMENT_API_URL=https://mngs.livevpn.com:3084
+
+# One-time enrollment token. Ask the management admin.
+ENROLLMENT_TOKEN=replace-me
+
+# Optional long-lived token for /agents/register fallback.
+# MANAGEMENT_API_TOKEN=
+
+# Filesystem layout. Defaults below are FreeBSD-native.
+OLV_WG_DIR=/usr/local/etc/wireguard
+OLV_CERT_DIR=/var/db/olv-agent/certs
+
+# Root pf anchor. Must match the declaration in /etc/pf.conf.
+OLV_PF_ANCHOR=olv-fw
+
+# Heartbeat cadence in seconds (0 disables).
+HEARTBEAT_INTERVAL=30
+
+# Optional — advertise a specific public URL to the management server.
+# Defaults to cloud-metadata-detected public IP.
+# PUBLIC_URL=https://my-bsd-gateway.example.com

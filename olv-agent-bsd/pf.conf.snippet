@@ -1,0 +1,26 @@
+# --- OpenLay VPN agent anchors -------------------------------------------
+# The agent owns every rule inside these anchors. Do NOT hand-edit; the
+# bodies are rebuilt from JSON under /usr/local/etc/wireguard/ on every
+# mutation and on agent boot (see RestoreAll / RestorePolicies in the
+# router package).
+#
+# Append this block to the end of /etc/pf.conf (install.sh does this
+# automatically — this file is documentation for operators reviewing
+# or customising the pf setup).
+#
+# Ordering is load-bearing — pf evaluates these anchors in the order
+# they appear, so any reorder will silently change semantics:
+#
+#   rdr-anchor  (M3) — DNAT. rdr rewrites destination BEFORE filter
+#                       evaluates, so companion `pass` rules for the
+#                       translated traffic live inside olv-rdr/* too.
+#   nat-anchor  (M3) — SNAT. rewrites source on egress (after filter).
+#   olv-policy  (M2) — policy-based routing (`route-to`). Placed before
+#                       olv-fw so a matching `pass quick ... route-to`
+#                       wins over block_wan / block_all terminals.
+#   olv-fw      (M1) — filter rules (accept/drop) + default policy.
+
+rdr-anchor "olv-rdr/*"
+nat-anchor "olv-nat/*"
+anchor "olv-policy/*"
+anchor "olv-fw/*"
