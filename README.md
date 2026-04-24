@@ -5,23 +5,25 @@ Server deployment packages for OpenLay VPN infrastructure.
 ## Architecture
 
 ```
-┌──────────────────────────────────┐       ┌──────────────────────────┐
-│  Management Server               │       │  VPN Agent (Docker)      │
-│  ┌────────────────────────────┐  │  WSS  │  ┌────────────────────┐  │
-│  │ Admin Dashboard (port 3084)│◄─┼───────┼──│ WireGuard          │  │
-│  │ REST API                   │  │       │  │ Firewall            │  │
-│  │ WebSocket Agent Hub        │  │       │  │ DNS Filter          │  │
-│  ├────────────────────────────┤  │       │  └────────────────────┘  │
-│  │ App API (port 443)         │  │       │  Runs on each VPN server │
-│  │ VPN client endpoint        │  │       └──────────────────────────┘
-│  └────────────────────────────┘  │
+┌──────────────────────────────────┐       ┌──────────────────────────────┐
+│  Management Server (Linux)       │       │  VPN Agent (FreeBSD)         │
+│  ┌────────────────────────────┐  │  WSS  │  ┌────────────────────────┐  │
+│  │ Admin Dashboard (port 3084)│◄─┼───────┼──│ WireGuard (if_wg)      │  │
+│  │ REST API                   │  │       │  │ Firewall (pf)          │  │
+│  │ WebSocket Agent Hub        │  │       │  │ DNS Filter             │  │
+│  ├────────────────────────────┤  │       │  └────────────────────────┘  │
+│  │ App API (port 443)         │  │       │  Native Go binary, rc.d      │
+│  │ VPN client endpoint        │  │       │  Runs on each VPN server     │
+│  └────────────────────────────┘  │       └──────────────────────────────┘
 │  Install on: 1 management server │
 └──────────────────────────────────┘
 ```
 
 These are **separate packages** installed on **different servers**:
-- **olv-management** — Install once on your management server
-- **olv-agent** — Install on each VPN server
+- **olv-management** — Install once on your management server (Linux)
+- **olv-agent-bsd** — Native FreeBSD agent on each VPN server (static Go binary, uses `if_wg` + pf)
+
+> **Note:** The Linux Docker agent (`olv-agent-dkr`) is no longer supported. New deployments should use `olv-agent-bsd` on FreeBSD.
 
 ---
 
@@ -88,65 +90,86 @@ See [olv-management/linux/README.md](olv-management/linux/README.md) for detaile
 
 ---
 
-## 2. VPN Agent (Docker)
+## 2. VPN Agent (FreeBSD)
 
-The agent runs on each VPN server and manages WireGuard tunnels, firewall rules, and DNS filtering.
+Static Go binary for FreeBSD 13.2+ using kernel `if_wg` + pf. No Docker, no Node runtime — one binary under `/usr/local/sbin/olv-agent` managed by rc.d.
 
 ### Quick Install
 
-```bash
+Via `olv.sh` (auto-dispatches to the FreeBSD agent):
+
+```sh
 curl -fsSL -o olv.sh https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh
 chmod +x olv.sh
 sudo ./olv.sh install olv-agent
 ```
 
-The installer will prompt for:
-- Management server URL (default: `https://localhost:3084`)
-- Enrollment token (from management dashboard → Settings → Enrollment Tokens)
-- VPN listen port (default: `51820`)
+Or one-liner directly:
+
+```sh
+fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh | sh
+```
+
+Non-interactive (CI / automation):
+
+```sh
+MANAGEMENT_API_URL=https://mng.livevpn.com:3084 \
+ENROLLMENT_TOKEN=your-one-time-token \
+  sh -c "$(fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh)"
+```
+
+Get an enrollment token from the management dashboard → Settings → Enrollment Tokens.
 
 ### What Gets Installed
 
 | Component | Description |
 |-----------|-------------|
-| Docker container `olv-agent` | WireGuard + firewall + DNS filter |
+| `/usr/local/sbin/olv-agent` | Static Go binary (amd64 or arm64) |
+| `/usr/local/etc/rc.d/olv-agent` | rc.d service |
+| `/usr/local/etc/olv-agent/agent.conf` | URL + token config |
+| `/var/db/olv-agent/certs/` | Client cert issued by management |
+| pf anchors | `olv-rdr/*`, `olv-nat/*`, `olv-policy/*`, `olv-fw/*` in `/etc/pf.conf` |
 | Port `51820/udp` | VPN traffic |
 
-Auto-installs: Docker, Docker Compose, enables IP forwarding.
+Auto-installs: `wireguard-tools`, `ca_root_nss` via `pkg`. Loads `if_wg` kernel module, enables pf + IP forwarding. Binary sha256-verified against `SHA256SUMS`.
 
 ### Agent Commands
 
-```bash
-# Update
+```sh
+# Status / restart / stop
+service olv-agent status
+service olv-agent restart
+service olv-agent stop
+
+# Logs (rc.d stdout/stderr)
+tail -f /var/log/olv-agent.log
+
+# Update (idempotent — preserves agent.conf + certs)
 sudo ./olv.sh update olv-agent
 
 # Uninstall
 sudo ./olv.sh uninstall olv-agent
-
-# View logs
-cd /opt/olv-agent && docker compose logs -f
-
-# Restart
-cd /opt/olv-agent && docker compose restart
 ```
+
+See [olv-agent-bsd/README.md](olv-agent-bsd/README.md) for pf layout, cert rotation, and troubleshooting.
 
 ---
 
 ## Manual Setup
 
-If you prefer to run scripts directly without `olv.sh`:
+If you prefer to run scripts directly without the one-liner installers:
 
 ```bash
 git clone https://github.com/openlay/openlay-vpn-release.git
 cd openlay-vpn-release
 
-# Management server
+# Management server (Linux)
 cd olv-management/linux
 sudo ./install.sh
 
-# Agent (on a different server)
-cd olv-agent-dkr
-sudo ./install.sh
+# Agent (FreeBSD VPN server)
+cd ../../olv-agent-bsd
+sh ./install.sh
 ```
 
 ## Requirements
@@ -154,6 +177,6 @@ sudo ./install.sh
 | Package | OS | Dependencies |
 |---------|-----|-------------|
 | olv-management | Rocky 8/9, RHEL 8/9, Ubuntu 20.04+ | Node.js, PostgreSQL (auto-installed) |
-| olv-agent | Any Linux with Docker support | Docker (auto-installed) |
+| olv-agent-bsd | FreeBSD 13.2+ (amd64 / arm64) | `wireguard-tools`, `ca_root_nss` (auto via `pkg`), kernel `if_wg`, pf |
 
-Both require root access and internet connection.
+All require root access and internet connection.

@@ -2,18 +2,21 @@
 # =============================================================================
 # OpenLay VPN — Unified Installer
 #
+# `olv-agent` dispatches to the native FreeBSD agent (olv-agent-bsd). The old
+# Linux Docker agent (olv-agent-dkr) is no longer supported.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh | bash -s -- install olv-management
-#   curl -fsSL https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh | bash -s -- install olv-agent
+#   curl -fsSL https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh | sh -s -- install olv-agent
 #
 # Or clone and run locally:
-#   ./olv.sh install olv-management
-#   ./olv.sh update olv-management
-#   ./olv.sh uninstall olv-management
+#   ./olv.sh install olv-management     # Linux
+#   ./olv.sh update olv-management      # Linux
+#   ./olv.sh uninstall olv-management   # Linux
 #
-#   ./olv.sh install olv-agent
-#   ./olv.sh update olv-agent
-#   ./olv.sh uninstall olv-agent
+#   ./olv.sh install olv-agent          # FreeBSD
+#   ./olv.sh update olv-agent           # FreeBSD
+#   ./olv.sh uninstall olv-agent        # FreeBSD
 # =============================================================================
 set -e
 
@@ -42,8 +45,8 @@ usage() {
   echo "  init-root   Create root admin account (olv-management only)"
   echo ""
   echo "Packages:"
-  echo "  olv-management   Management server + App API + Dashboard"
-  echo "  olv-agent        WireGuard agent (Docker)"
+  echo "  olv-management   Management server + App API + Dashboard (Linux)"
+  echo "  olv-agent        WireGuard agent (FreeBSD, native)"
   echo ""
   echo "Examples:"
   echo "  $0 install olv-management"
@@ -127,19 +130,22 @@ case "$PACKAGE" in
     ;;
 
   olv-agent)
-    SCRIPT_DIR="$INSTALL_DIR/olv-agent-dkr"
+    # Always dispatch to the FreeBSD agent — Linux Docker agent is retired.
+    SCRIPT_DIR="$INSTALL_DIR/olv-agent-bsd"
+    # olv-agent-bsd scripts are /bin/sh, not bash.
     case "$ACTION" in
       install)
         [ -f "$SCRIPT_DIR/install.sh" ] || error "install.sh not found in $SCRIPT_DIR"
-        bash "$SCRIPT_DIR/install.sh" "${@:3}"
+        sh "$SCRIPT_DIR/install.sh" "${@:3}"
         ;;
       update)
-        [ -f "$SCRIPT_DIR/update.sh" ] || error "update.sh not found in $SCRIPT_DIR"
-        bash "$SCRIPT_DIR/update.sh" "${@:3}"
+        # olv-agent-bsd install.sh is idempotent — preserves agent.conf + certs.
+        [ -f "$SCRIPT_DIR/install.sh" ] || error "install.sh not found in $SCRIPT_DIR"
+        sh "$SCRIPT_DIR/install.sh" "${@:3}"
         ;;
       uninstall)
         [ -f "$SCRIPT_DIR/uninstall.sh" ] || error "uninstall.sh not found in $SCRIPT_DIR"
-        bash "$SCRIPT_DIR/uninstall.sh" "${@:3}"
+        sh "$SCRIPT_DIR/uninstall.sh" "${@:3}"
         ;;
       *)
         error "Unknown action: $ACTION (use install, update, or uninstall)"
