@@ -6,29 +6,38 @@ kernel `if_wg` + pf. One binary, no runtime dependencies beyond
 
 ## Install
 
+### Fastest — one-liner (interactive)
+
 ```sh
-cd /tmp
-fetch https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh
-chmod +x install.sh
-./install.sh
+fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh | sh
 ```
 
-The installer:
+The installer prompts for **Management URL** + **Enrollment token**,
+downloads the right binary for your arch, verifies sha256, wires up pf
+anchors + IP forwarding, and starts the service. Agent is online when
+the script exits.
+
+### Non-interactive (automation)
+
+```sh
+MANAGEMENT_API_URL=https://mng.livevpn.com:3084 \
+ENROLLMENT_TOKEN=your-one-time-token \
+  sh -c "$(fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh)"
+```
+
+### What the installer does
+
 1. Loads `if_wg` kernel module + bumps `net.fibs` for policy routing
 2. `pkg install wireguard-tools ca_root_nss`
-3. Enables pf + IP forwarding + adds `olv-nat/*`, `olv-policy/*`,
-   `olv-fw/*`, `olv-rdr/*` anchors to `/etc/pf.conf`
-4. Copies the right binary for your arch to `/usr/local/sbin/olv-agent`
-5. Installs rc.d service + sample `agent.conf`
+3. Enables pf + IP forwarding + adds `olv-rdr/*`, `olv-nat/*`,
+   `olv-policy/*`, `olv-fw/*` anchors to `/etc/pf.conf`
+4. Installs `/usr/local/sbin/olv-agent` (arch-correct binary, sha256-verified)
+5. Installs rc.d service + writes `/usr/local/etc/olv-agent/agent.conf`
+   with the URL + token you provided
 6. Starts the service
 
-After install, edit `/usr/local/etc/olv-agent/agent.conf` to fill in
-`MANAGEMENT_API_URL` and `ENROLLMENT_TOKEN`, then:
-
-```sh
-service olv-agent restart
-tail -f /var/log/olv-agent.log
-```
+Re-running the installer on the same host is safe — agent.conf + cert
+dir are preserved.
 
 ## Layout
 
