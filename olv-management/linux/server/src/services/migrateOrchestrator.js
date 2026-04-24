@@ -73,8 +73,22 @@ class Migrator {
       await this.stepStaticIPs();
       await this.stepAdvancedRouting();
     } catch (err) {
+      // Log BEFORE rollback — rollback can produce its own errors and blur
+      // which step actually triggered the abort. Gives journalctl a clear
+      // pre-rollback stack trace even when the response is later read only
+      // in the iOS UI (where it may be truncated).
+      console.error(`[migrate] step failed, rolling back — source=${this.sourceId} dest=${this.destId}`);
+      console.error(`[migrate] error: ${err.message}`);
+      if (err.stack) console.error(err.stack);
+      console.error(`[migrate] completed steps so far:`, JSON.stringify(this.steps, null, 2));
+
       // Abort + rollback. Don't mask the original error.
       if (!this.dryRun) await this.rollback();
+
+      if (this.rollbackErrors.length > 0) {
+        console.error(`[migrate] rollback errors:`, JSON.stringify(this.rollbackErrors, null, 2));
+      }
+
       return {
         dryRun: this.dryRun,
         steps: this.steps,

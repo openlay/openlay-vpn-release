@@ -26,17 +26,26 @@ router.post('/:sourceId', async (req, res) => {
     // convertToSnakeCase so the body arrives as {dry_run, rename_interfaces_from}.
     const dryRunBody = body.dryRun ?? body.dry_run;
     const renameBody = body.renameInterfacesFrom ?? body.rename_interfaces_from;
+    const dryRun = !!dryRunBody || req.query.dryRun === 'true' || req.query.dryRun === '1';
+    console.log(`[migrate] ${dryRun ? 'dry-run' : 'run'} source=${sourceId} dest=${destId} by=${req.user?.id || 'internal'}`);
     const result = await migrateServer({
       sourceId,
       destId,
       renameInterfacesFrom: renameBody || {},
-      dryRun: !!dryRunBody || req.query.dryRun === 'true' || req.query.dryRun === '1',
+      dryRun,
     });
+    if (result.rollback) {
+      console.error(`[migrate] ROLLBACK source=${sourceId} dest=${destId}`,
+        JSON.stringify(result.errors, null, 2));
+    } else {
+      console.log(`[migrate] OK source=${sourceId} dest=${destId} steps=${result.steps?.length || 0}`);
+    }
     // rollback=true means migration failed and the dest was reverted; return
     // 500 so iOS clearly surfaces the failure, but keep the body structured.
     const status = result.rollback ? 500 : 200;
     res.status(status).json(result);
   } catch (err) {
+    console.error(`[migrate] FAIL source=${req.params.sourceId} dest=${req.params.destId}: ${err.message}`, err.stack);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
