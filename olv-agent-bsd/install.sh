@@ -221,11 +221,31 @@ if [ ! -f /usr/local/etc/olv-agent/agent.conf ]; then
 	echo "  wrote /usr/local/etc/olv-agent/agent.conf"
 fi
 
+echo "  installing rc.d service file"
 install -m 0755 "$ASSET_DIR/olv-agent.rc" /usr/local/etc/rc.d/olv-agent
 
 echo "[5/6] enabling + starting service"
 sysrc olv_agent_enable=YES >/dev/null
-service olv-agent restart || service olv-agent start
+# Start in the background so the installer returns even if the agent's
+# first enrollment handshake takes a while. service(8) otherwise waits
+# for rc.d to return, and `daemon -f` can block briefly until the child
+# detaches — which on a slow-network host looks like a hang.
+(
+	service olv-agent restart || service olv-agent start
+) >/var/log/olv-agent-install.log 2>&1 &
+SVC_PID=$!
+# Give it up to 10s to fork the daemon; don't block longer.
+WAITED=0
+while kill -0 "$SVC_PID" 2>/dev/null && [ "$WAITED" -lt 10 ]; do
+	sleep 1
+	WAITED=$((WAITED + 1))
+done
+if kill -0 "$SVC_PID" 2>/dev/null; then
+	echo "  service start still running after ${WAITED}s — continuing; check /var/log/olv-agent-install.log"
+else
+	wait "$SVC_PID" 2>/dev/null || true
+	echo "  service start returned"
+fi
 
 echo "[6/6] done."
 echo
