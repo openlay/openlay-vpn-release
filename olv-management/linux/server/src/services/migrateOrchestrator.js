@@ -380,6 +380,26 @@ class Migrator {
   // -------------------------------------------------------------------------
 
   async stepZones() {
+    // Built-in zones (any, vpn-peers, wan, …) exist on every server with
+    // their own auto-generated id. Rules reference zones by id, so a
+    // source rule pointing to zone 3 "wan" needs to be rewritten to the
+    // dest's id for "wan" — otherwise stepFirewallRules throws
+    // "Zone N not found" during resolveZone.
+    const { rows: srcBuiltin } = await pool.query(
+      'SELECT id, name FROM firewall_zones WHERE server_id = $1 AND builtin = true',
+      [this.sourceId]
+    );
+    const { rows: dstBuiltin } = await pool.query(
+      'SELECT id, name FROM firewall_zones WHERE server_id = $1 AND builtin = true',
+      [this.destId]
+    );
+    const dstByName = Object.fromEntries(dstBuiltin.map(z => [z.name, z.id]));
+    for (const z of srcBuiltin) {
+      if (dstByName[z.name] != null) {
+        this.zoneIdMap[z.id] = dstByName[z.name];
+      }
+    }
+
     const { rows: zones } = await pool.query(
       'SELECT id, name, description FROM firewall_zones WHERE server_id = $1 AND builtin = false ORDER BY id',
       [this.sourceId]
