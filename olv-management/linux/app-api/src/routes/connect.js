@@ -147,7 +147,8 @@ async function resolveServer(userId, serverId, requestedInterface) {
 
   // Auto-select: find server with fewest peers
   const { rows: assignments } = await pool.query(
-    `SELECT usa.*, s.url, s.hostname, s.public_ip, s.api_token, s.name as server_name
+    `SELECT usa.*, s.url, s.hostname, s.public_ip, s.api_token, s.name as server_name,
+            s.enterprise_id
      FROM user_server_assignments usa
      JOIN servers s ON usa.server_id = s.id
      WHERE usa.user_id = $1`,
@@ -170,8 +171,20 @@ async function resolveServer(userId, serverId, requestedInterface) {
       }
     }
 
+    // Propagate ALL host-resolving fields — endpoint builder below needs
+    // public_ip / url / hostname (any one is enough) and enterprise_id for
+    // TTL resolution. Missing any here is what caused the 409 "no public IP"
+    // when a server had only public_ip set.
     return {
-      server: { id: best.server_id, name: best.server_name, url: best.url, api_token: best.api_token },
+      server: {
+        id: best.server_id,
+        name: best.server_name,
+        url: best.url,
+        hostname: best.hostname,
+        public_ip: best.public_ip,
+        api_token: best.api_token,
+        enterprise_id: best.enterprise_id,
+      },
       interfaceName: best.interface_name,
       subnetId: best.subnet_id,
     };
