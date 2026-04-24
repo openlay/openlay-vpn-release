@@ -55,15 +55,20 @@ router.post('/', async (req, res) => {
   try {
     await verifyAccess(req.params.serverId, req);
     const b = req.body || {};
+    // iOS APIClient encodes bodies as snake_case; accept both so older
+    // camelCase callers keep working.
+    const wanIface = b.wanIface ?? b.wan_iface;
+    const srcCIDR = b.srcCIDR ?? b.src_cidr;
+    const natTo = b.natTo ?? b.nat_to;
     if (!b.name) return res.status(400).json({ error: 'name is required' });
-    if (!b.wanIface) return res.status(400).json({ error: 'wanIface is required' });
-    if (!b.srcCIDR) return res.status(400).json({ error: 'srcCIDR is required' });
+    if (!wanIface) return res.status(400).json({ error: 'wanIface is required' });
+    if (!srcCIDR) return res.status(400).json({ error: 'srcCIDR is required' });
 
     const rule = {
       name: b.name,
-      wanIface: b.wanIface,
-      srcCIDR: b.srcCIDR,
-      natTo: b.natTo || '',
+      wanIface,
+      srcCIDR,
+      natTo: natTo || '',
       protocol: b.protocol || '',
       description: b.description || '',
       enabled: b.enabled === undefined ? true : !!b.enabled,
