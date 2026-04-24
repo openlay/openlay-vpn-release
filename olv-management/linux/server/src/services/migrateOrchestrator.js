@@ -223,16 +223,14 @@ class Migrator {
   // We copy both indiscriminately — the distinction is preserved by
   // whatever columns we carry over (device_id, user_id, expires_at, ...).
   //
-  // PSK caveat: Node agent's listPeers returns `presharedKey: true|false`
-  // instead of the actual key (security hardening). Cross-agent copy
-  // cannot preserve the PSK — the peer reconnects without PSK until the
-  // admin rotates. Same-agent upgrades (Go→Go) preserve it.
+  // PSK: we use listPeersWithSecrets (privileged WSS-only command) to get
+  // the real PSK string. The plain listPeers redacts PSK for UI safety.
 
   async stepPeers() {
     for (const [srcIface, destIface] of Object.entries(this.ifaceNameMap)) {
       const resp = this.dryRun
-        ? await this.src.listPeers(srcIface).catch(() => ({ peers: [] }))
-        : await this.src.listPeers(srcIface);
+        ? await this.src.listPeersWithSecrets(srcIface).catch(() => ({ peers: [] }))
+        : await this.src.listPeersWithSecrets(srcIface);
       const peers = resp?.peers || [];
 
       // Preload peers_meta rows for this source iface so we can copy
@@ -266,9 +264,10 @@ class Migrator {
         await this.dst.addPeer(destIface, {
           publicKey: pub,
           allowedIPs: p.allowedIPs || p.allowed_ips || '',
-          // PSK: pass through only if source returned a real string. Node's
-          // listPeers returns a bool here so we skip it — not copyable.
-          presharedKey: typeof p.presharedKey === 'string' ? p.presharedKey : undefined,
+          // PSK: listPeersWithSecrets returns plaintext. Skip empty.
+          presharedKey: (typeof p.presharedKey === 'string' && p.presharedKey.length > 0)
+            ? p.presharedKey
+            : undefined,
           endpoint: p.endpoint || undefined,
           persistentKeepalive: Number.isFinite(kaNum) && kaNum > 0 ? kaNum : undefined,
           alias: p.alias || undefined,

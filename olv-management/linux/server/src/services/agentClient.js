@@ -33,6 +33,9 @@ class AgentClient {
 
   // Peers
   listPeers(iface) { return this.request('listPeers', { iface }); }
+  // Internal-only — returns PSK as plaintext. Used by migrate; never
+  // surface via user-facing route.
+  listPeersWithSecrets(iface) { return this.request('listPeersWithSecrets', { iface }); }
   addPeer(iface, data) { return this.request('addPeer', { iface, ...data }); }
   getPeer(iface, pubkey) { return this.request('getPeer', { iface, pubkey }); }
   updatePeer(iface, pubkey, data) { return this.request('updatePeer', { iface, pubkey, ...data }); }
