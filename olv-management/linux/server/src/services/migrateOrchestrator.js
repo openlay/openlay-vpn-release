@@ -494,6 +494,17 @@ class Migrator {
   async stepFirewallRules() {
     const all = await this.src.firewallGetAllRules();
     const byIface = all?.interfaces || {};
+    // Valid zone/alias ids on dest after zones+aliases steps — used to
+    // surface orphan references in source rules with a helpful message.
+    const { rows: dstZones } = await pool.query(
+      'SELECT id FROM firewall_zones WHERE server_id = $1', [this.destId]
+    );
+    const validZoneIds = new Set(dstZones.map(z => z.id));
+    const { rows: dstAliases } = await pool.query(
+      'SELECT id FROM firewall_aliases WHERE server_id = $1', [this.destId]
+    );
+    const validAliasIds = new Set(dstAliases.map(a => a.id));
+
     for (const [srcIface, rules] of Object.entries(byIface)) {
       const destIface = this.ifaceNameMap[srcIface] || srcIface;
       for (const r of rules) {
@@ -503,12 +514,35 @@ class Migrator {
         }
         // Remap any zone/alias IDs baked into the rule body. User IDs stay
         // identical (users are shared across servers).
+        const mappedSrcZone = mapId(r.srcZoneId, this.zoneIdMap);
+        const mappedDstZone = mapId(r.dstZoneId, this.zoneIdMap);
+        const mappedSrcAlias = mapId(r.srcAliasId, this.aliasIdMap);
+        const mappedDstAlias = mapId(r.dstAliasId, this.aliasIdMap);
+
+        // Validate remaps against dest state. If a rule references a zone
+        // that was orphaned on source (deleted zone still referenced) the
+        // mapped id won't exist on dest either — skip rather than throw so
+        // migration finishes instead of rolling back every other resource.
+        const orphans = [];
+        if (r.srcZoneId != null && !validZoneIds.has(mappedSrcZone)) orphans.push(`srcZoneId=${r.srcZoneId}`);
+        if (r.dstZoneId != null && !validZoneIds.has(mappedDstZone)) orphans.push(`dstZoneId=${r.dstZoneId}`);
+        if (r.srcAliasId != null && !validAliasIds.has(mappedSrcAlias)) orphans.push(`srcAliasId=${r.srcAliasId}`);
+        if (r.dstAliasId != null && !validAliasIds.has(mappedDstAlias)) orphans.push(`dstAliasId=${r.dstAliasId}`);
+        if (orphans.length > 0) {
+          console.warn(`[migrate] skipping rule "${r.label || r.id}" on ${srcIface}: orphan refs ${orphans.join(', ')}`);
+          this.steps.push({
+            resource: 'rule', iface: destIface, label: r.label,
+            status: 'skipped', reason: `orphan refs: ${orphans.join(', ')}`,
+          });
+          continue;
+        }
+
         const body = {
           ...r,
-          srcZoneId: mapId(r.srcZoneId, this.zoneIdMap),
-          dstZoneId: mapId(r.dstZoneId, this.zoneIdMap),
-          srcAliasId: mapId(r.srcAliasId, this.aliasIdMap),
-          dstAliasId: mapId(r.dstAliasId, this.aliasIdMap),
+          srcZoneId: mappedSrcZone,
+          dstZoneId: mappedDstZone,
+          srcAliasId: mappedSrcAlias,
+          dstAliasId: mappedDstAlias,
         };
         // Clear id/groupId from the source-side rule object so the dest
         // orchestrator generates a fresh groupId.
