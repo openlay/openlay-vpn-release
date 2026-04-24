@@ -190,9 +190,35 @@ async function resolveServer(userId, serverId, requestedInterface) {
     };
   }
 
-  // No assignments — pick from public + active servers only, fewest peers
-  const { rows: allServers } = await pool.query("SELECT * FROM servers WHERE access_mode = 'public' AND status = 'active'");
-  if (allServers.length === 0) {
+  // No explicit assignments. Mirror the priority /api/servers advertises:
+  //   a) Public servers owned by the user's own enterprise(s) — "enterprise
+  //      public". Preferred because they're on infra the user's org controls.
+  //   b) Fall back to globally public servers (enterprise_id IS NULL) if no
+  //      enterprise-public candidate exists.
+  // Within each tier we pick fewest peers (least-busy).
+  const { rows: entRows } = await pool.query(
+    'SELECT enterprise_id FROM user_enterprise_roles WHERE user_id = $1',
+    [userId]
+  );
+  const entIds = entRows.map(r => r.enterprise_id).filter(Boolean);
+
+  let candidates = [];
+  if (entIds.length > 0) {
+    const { rows } = await pool.query(
+      `SELECT * FROM servers
+       WHERE access_mode = 'public' AND status = 'active'
+         AND enterprise_id = ANY($1::text[])`,
+      [entIds]
+    );
+    candidates = rows;
+  }
+  if (candidates.length === 0) {
+    const { rows } = await pool.query(
+      "SELECT * FROM servers WHERE access_mode = 'public' AND status = 'active' AND enterprise_id IS NULL"
+    );
+    candidates = rows;
+  }
+  if (candidates.length === 0) {
     const err = new Error('No servers available');
     err.status = 503;
     throw err;
@@ -201,7 +227,7 @@ async function resolveServer(userId, serverId, requestedInterface) {
   let best = null;
   let bestCount = Infinity;
 
-  for (const srv of allServers) {
+  for (const srv of candidates) {
     const { rows: subnets } = await pool.query(
       'SELECT * FROM subnets WHERE server_id = $1 ORDER BY created_at LIMIT 1',
       [srv.id]
