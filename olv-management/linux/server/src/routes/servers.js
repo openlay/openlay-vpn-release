@@ -373,6 +373,30 @@ router.get('/:id/agent-version', async (req, res) => {
   }
 });
 
+// GET /api/servers/:id/agent-version/latest — fetches the agent's latest
+// shipped VERSION from the release repo. Client gates the agent Update
+// button on `available === true`.
+const AGENT_LATEST_URL = 'https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/VERSION';
+router.get('/:id/agent-version/latest', async (req, res) => {
+  try {
+    const client = new AgentClient(parseInt(req.params.id));
+    const health = await client.healthFast().catch(() => ({ version: 'unknown' }));
+    const current = health.version || 'unknown';
+
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    const body = await fetch(AGENT_LATEST_URL, { signal: ctl.signal })
+      .then(r => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .finally(() => clearTimeout(timer));
+    const match = body.match(/version\s*=\s*(\S+)/);
+    const latest = match ? match[1].trim() : '';
+    if (!latest) return res.status(502).json({ error: 'Could not parse remote VERSION' });
+    res.json({ version: current, latest, available: latest !== current });
+  } catch (err) {
+    res.status(502).json({ error: `Could not reach release server: ${err.message}` });
+  }
+});
+
 // POST /api/servers/:id/agent-update — root only
 router.post('/:id/agent-update', async (req, res) => {
   if (req.enterpriseRole !== 'root') {
@@ -390,6 +414,20 @@ router.post('/:id/agent-update', async (req, res) => {
 // GET /api/servers/:id/users — only users in this enterprise
 router.get('/:id/users', async (req, res) => {
   try {
+    const isRoot = req.enterpriseRole === 'root';
+    // Visibility:
+    //   root              → see all assignments on the server
+    //   enterprise admin  → see assignments on servers in their enterprise
+    //                       OR on public servers (shared infra). Without
+    //                       this branch a public server's Users tab silently
+    //                       shows empty while DELETE interface still counts
+    //                       the rows and refuses the delete.
+    const scopeClause = isRoot
+      ? ''
+      : `AND (
+           usa.server_id IN (SELECT id FROM servers WHERE enterprise_id = $2)
+           OR usa.server_id IN (SELECT id FROM servers WHERE access_mode = 'public')
+         )`;
     const { rows } = await pool.query(`
       SELECT usa.id as assignment_id, usa.interface_name, usa.subnet_id,
         u.id as user_id, u.name as user_name, u.email as user_email, u.status as user_status,
@@ -400,7 +438,7 @@ router.get('/:id/users', async (req, res) => {
       LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = $2
       LEFT JOIN subnets sub ON usa.subnet_id = sub.id
       WHERE usa.server_id = $1
-        AND usa.server_id IN (SELECT id FROM servers WHERE enterprise_id = $2)
+      ${scopeClause}
       ORDER BY COALESCE(NULLIF(uer.alias, ''), u.name, u.email)
     `, [req.params.id, req.enterpriseId]);
     res.json({ users: rows });
@@ -444,10 +482,23 @@ router.post('/:id/users', async (req, res) => {
 // DELETE /api/servers/:id/users/:assignmentId
 router.delete('/:id/users/:assignmentId', async (req, res) => {
   try {
+    const isRoot = req.enterpriseRole === 'root';
+    // Same scoping as GET /:id/users: root sees all, enterprise admin sees
+    // their enterprise's servers OR any public server.
+    const params = [req.params.assignmentId, req.params.id];
+    let scopeClause = '';
+    if (!isRoot) {
+      params.push(req.enterpriseId);
+      scopeClause = `AND (
+        server_id IN (SELECT id FROM servers WHERE enterprise_id = $3)
+        OR server_id IN (SELECT id FROM servers WHERE access_mode = 'public')
+      )`;
+    }
     const { rowCount } = await pool.query(
-      `DELETE FROM user_server_assignments WHERE id = $1 AND server_id = $2
-       AND server_id IN (SELECT id FROM servers WHERE enterprise_id = $3)`,
-      [req.params.assignmentId, req.params.id, req.enterpriseId]
+      `DELETE FROM user_server_assignments
+       WHERE id = $1 AND server_id = $2
+       ${scopeClause}`,
+      params
     );
     if (rowCount === 0) return res.status(404).json({ error: 'Assignment not found' });
     res.json({ deleted: true });

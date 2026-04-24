@@ -125,6 +125,42 @@ router.delete('/:iface', async (req, res) => {
 
     const { client } = await getClient(req.params.serverId, req);
     const data = await client.deleteInterface(req.params.iface);
+
+    // Cascade-clean DB rows that referenced this iface by string name. Without
+    // this, orphan rows linger and surface as: migrate empty-check failures,
+    // ghost entries in the admin UI, and (worst) silent re-activation if a
+    // future interface is created with the same name. All tables below hold
+    // `iface`/`wan_iface` as VARCHAR with no FK, so cascade lives in code.
+    const sid = req.params.serverId;
+    const ifname = req.params.iface;
+    const cascade = await pool.connect();
+    try {
+      await cascade.query('BEGIN');
+      await cascade.query('DELETE FROM subnets              WHERE server_id = $1 AND interface_name = $2', [sid, ifname]);
+      await cascade.query('DELETE FROM peers_meta           WHERE server_id = $1 AND interface_name = $2', [sid, ifname]);
+      await cascade.query('DELETE FROM nat_rules            WHERE server_id = $1 AND wan_iface      = $2', [sid, ifname]);
+      await cascade.query('DELETE FROM rdr_rules            WHERE server_id = $1 AND wan_iface      = $2', [sid, ifname]);
+      await cascade.query('DELETE FROM routes               WHERE server_id = $1 AND iface          = $2', [sid, ifname]);
+      await cascade.query('DELETE FROM route_policies       WHERE server_id = $1 AND (ingress_iface = $2 OR gateway_iface = $2)', [sid, ifname]);
+      // firewall_zone_members: interface-type members holding this iface name
+      await cascade.query(
+        `DELETE FROM firewall_zone_members
+          WHERE member_type = 'interface'
+            AND member_value = $2
+            AND zone_id IN (SELECT id FROM firewall_zones WHERE server_id = $1)`,
+        [sid, ifname]
+      );
+      await cascade.query('COMMIT');
+    } catch (cascadeErr) {
+      await cascade.query('ROLLBACK');
+      console.error('[interfaces] cascade cleanup failed:', cascadeErr.message);
+      // Don't fail the whole request — the WG interface is already gone on
+      // the agent. Surface a warning alongside the success payload.
+      return res.json({ ...data, warning: `cascade cleanup failed: ${cascadeErr.message}` });
+    } finally {
+      cascade.release();
+    }
+
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

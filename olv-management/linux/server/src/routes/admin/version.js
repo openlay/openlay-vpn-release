@@ -8,9 +8,34 @@ router.use(enterpriseContext);
 
 const ALLOWED_SERVICES = ['olv-management', 'olv-app-api'];
 
+const LATEST_URL = 'https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-management/linux/VERSION';
+
 // GET /api/admin/version
 router.get('/', (req, res) => {
   res.json({ version: pkg.version });
+});
+
+// GET /api/admin/version/latest — fetches the remote VERSION file from the
+// release repo and reports whether an upgrade is available. Client gates
+// the Update button on `available === true`.
+router.get('/latest', async (req, res) => {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    const body = await fetch(LATEST_URL, { signal: ctl.signal })
+      .then(r => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .finally(() => clearTimeout(timer));
+    const match = body.match(/version\s*=\s*(\S+)/);
+    const latest = match ? match[1].trim() : '';
+    if (!latest) return res.status(502).json({ error: 'Could not parse remote VERSION' });
+    res.json({
+      version: pkg.version,
+      latest,
+      available: latest !== pkg.version,
+    });
+  } catch (err) {
+    res.status(502).json({ error: `Could not reach release server: ${err.message}` });
+  }
 });
 
 // POST /api/admin/version/update — root only
