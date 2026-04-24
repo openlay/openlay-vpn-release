@@ -96,15 +96,7 @@ Static Go binary for FreeBSD 13.2+ using kernel `if_wg` + pf. No Docker, no Node
 
 ### Quick Install
 
-Via `olv.sh` (auto-dispatches to the FreeBSD agent):
-
-```sh
-curl -fsSL -o olv.sh https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh
-chmod +x olv.sh
-sudo ./olv.sh install olv-agent
-```
-
-Or one-liner directly:
+Run as **root** (FreeBSD base has no `sudo`; use `su -` or log in as root):
 
 ```sh
 fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh | sh
@@ -116,6 +108,14 @@ Non-interactive (CI / automation):
 MANAGEMENT_API_URL=https://mng.livevpn.com:3084 \
 ENROLLMENT_TOKEN=your-one-time-token \
   sh -c "$(fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh)"
+```
+
+Or via `olv.sh` after cloning the repo (auto-dispatches to the FreeBSD agent):
+
+```sh
+fetch -qo olv.sh https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv.sh
+chmod +x olv.sh
+./olv.sh install olv-agent
 ```
 
 Get an enrollment token from the management dashboard → Settings → Enrollment Tokens.
@@ -135,6 +135,8 @@ Auto-installs: `wireguard-tools`, `ca_root_nss` via `pkg`. Loads `if_wg` kernel 
 
 ### Agent Commands
 
+Run as **root** (FreeBSD base has no `sudo`).
+
 ```sh
 # Status / restart / stop
 service olv-agent status
@@ -145,10 +147,10 @@ service olv-agent stop
 tail -f /var/log/olv-agent.log
 
 # Update (idempotent — preserves agent.conf + certs)
-sudo ./olv.sh update olv-agent
+./olv.sh update olv-agent
 
 # Uninstall
-sudo ./olv.sh uninstall olv-agent
+./olv.sh uninstall olv-agent
 ```
 
 See [olv-agent-bsd/README.md](olv-agent-bsd/README.md) for pf layout, cert rotation, and troubleshooting.
@@ -159,16 +161,19 @@ See [olv-agent-bsd/README.md](olv-agent-bsd/README.md) for pf layout, cert rotat
 
 If you prefer to run scripts directly without the one-liner installers:
 
+Management server (Linux, use `sudo`):
+
 ```bash
 git clone https://github.com/openlay/openlay-vpn-release.git
-cd openlay-vpn-release
-
-# Management server (Linux)
-cd olv-management/linux
+cd openlay-vpn-release/olv-management/linux
 sudo ./install.sh
+```
 
-# Agent (FreeBSD VPN server)
-cd ../../olv-agent-bsd
+Agent (FreeBSD VPN server, run as root — no `sudo`):
+
+```sh
+git clone https://github.com/openlay/openlay-vpn-release.git
+cd openlay-vpn-release/olv-agent-bsd
 sh ./install.sh
 ```
 
@@ -179,4 +184,4 @@ sh ./install.sh
 | olv-management | Rocky 8/9, RHEL 8/9, Ubuntu 20.04+ | Node.js, PostgreSQL (auto-installed) |
 | olv-agent-bsd | FreeBSD 13.2+ (amd64 / arm64) | `wireguard-tools`, `ca_root_nss` (auto via `pkg`), kernel `if_wg`, pf |
 
-All require root access and internet connection.
+All require root access and internet connection. FreeBSD base has no `sudo` — run the agent installer as root directly.
