@@ -49,6 +49,19 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/servers/:serverId/interfaces/all
+// Returns every system interface (physical + WireGuard) with an isWireGuard
+// flag. Physical interfaces render as read-only on the client.
+router.get('/all', async (req, res) => {
+  try {
+    const { client } = await getClient(req.params.serverId, req);
+    const data = await client.listAllInterfaces();
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 // GET /api/servers/:serverId/interfaces/:iface
 router.get('/:iface', async (req, res) => {
   try {
@@ -98,6 +111,18 @@ router.post('/', async (req, res) => {
 router.delete('/:iface', async (req, res) => {
   try {
     if (!requireRoot(req, res)) return;
+
+    // Block delete if any user is still assigned to this interface
+    const { rows: assigned } = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM user_server_assignments WHERE server_id = $1 AND interface_name = $2',
+      [req.params.serverId, req.params.iface]
+    );
+    if (assigned[0].count > 0) {
+      return res.status(409).json({
+        error: `Cannot delete interface: ${assigned[0].count} user(s) are still assigned to it. Please unassign them first.`,
+      });
+    }
+
     const { client } = await getClient(req.params.serverId, req);
     const data = await client.deleteInterface(req.params.iface);
     res.json(data);

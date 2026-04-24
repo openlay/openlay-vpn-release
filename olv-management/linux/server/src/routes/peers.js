@@ -43,12 +43,14 @@ router.get('/', async (req, res) => {
     );
 
     const metaMap = new Map(metaRows.map(m => [m.public_key, m]));
+    const agentKeys = new Set((agentData.peers || []).map(p => p.publicKey));
 
     const enrichedPeers = (agentData.peers || []).map(peer => {
       const meta = metaMap.get(peer.publicKey);
       return {
         ...peer,
         managed: !!meta,
+        orphan: false,
         subnetCidr: meta?.subnet_cidr || null,
         subnetName: meta?.subnet_name || null,
         notes: meta?.notes || '',
@@ -61,6 +63,34 @@ router.get('/', async (req, res) => {
         allowedSourceIp: meta?.allowed_source_ip || null,
       };
     });
+
+    // Surface orphaned peers_meta rows (agent has no matching WG peer — happens
+    // after agent reinstall / config wipe). They render in the list so the
+    // admin can remove them; delete just drops the DB row.
+    for (const meta of metaRows) {
+      if (agentKeys.has(meta.public_key)) continue;
+      enrichedPeers.push({
+        publicKey: meta.public_key,
+        allowedIPs: '',
+        endpoint: '',
+        persistentKeepalive: 0,
+        latestHandshake: null,
+        transferRx: 0,
+        transferTx: 0,
+        managed: true,
+        orphan: true,
+        subnetCidr: meta.subnet_cidr || null,
+        subnetName: meta.subnet_name || null,
+        notes: meta.notes || '',
+        metaAlias: meta.alias || '',
+        userName: meta.user_name || null,
+        userEmail: meta.user_email || null,
+        userAlias: meta.user_alias || null,
+        expiresAt: meta.expires_at || null,
+        isExpired: meta.is_expired || false,
+        allowedSourceIp: meta.allowed_source_ip || null,
+      });
+    }
 
     res.json({ peers: enrichedPeers });
   } catch (err) {
@@ -283,7 +313,14 @@ router.delete('/:pubkey', async (req, res) => {
     );
     const affectedUserId = ownerRows[0]?.user_id || null;
 
-    await client.removePeer(req.params.iface, pubkey);
+    // Agent may not have the peer (orphaned peers_meta rows after agent
+    // reinstall / config wipe). Log and continue so the DB row still gets
+    // cleaned — otherwise admin is stuck with phantom entries.
+    try {
+      await client.removePeer(req.params.iface, pubkey);
+    } catch (agentErr) {
+      console.warn(`[peers] agent removePeer failed for ${pubkey}:`, agentErr.message);
+    }
 
     // Clean up local metadata
     await pool.query(

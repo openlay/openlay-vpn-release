@@ -24,6 +24,13 @@ const firewallRouter = require('./routes/firewall');
 const firewallZonesRouter = require('./routes/firewall-zones');
 const firewallAliasesRouter = require('./routes/firewall-aliases');
 const dnsFilterRouter = require('./routes/dns-filter');
+const routesRouter = require('./routes/routes');
+const routePoliciesRouter = require('./routes/route-policies');
+const natRouter = require('./routes/nat');
+const portForwardsRouter = require('./routes/port-forwards');
+const sitesRouter = require('./routes/sites');
+const localPortForwardsRouter = require('./routes/local-port-forwards');
+const migrateRouter = require('./routes/migrate');
 const caManager = require('./services/caManager');
 const { startExpiryChecker } = require('./services/expiryChecker');
 
@@ -42,6 +49,14 @@ app.use('/api/servers/:serverId/firewall', firewallRouter);
 app.use('/api/servers/:serverId/firewall/zones', firewallZonesRouter);
 app.use('/api/servers/:serverId/firewall/aliases', firewallAliasesRouter);
 app.use('/api/servers/:serverId/dns', dnsFilterRouter);
+app.use('/api/servers/:serverId/routes', routesRouter);
+app.use('/api/servers/:serverId/route-policies', routePoliciesRouter);
+app.use('/api/servers/:serverId/nat', natRouter);
+app.use('/api/servers/:serverId/port-forwards', portForwardsRouter);
+app.use('/api/servers/:serverId/sites', sitesRouter);
+app.use('/api/servers/:serverId/local-port-forwards', localPortForwardsRouter);
+// POST /api/servers/:destId/migrate-from/:sourceId — root-only server clone.
+app.use('/api/servers/:destId/migrate-from', migrateRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/agents', agentsRouter);

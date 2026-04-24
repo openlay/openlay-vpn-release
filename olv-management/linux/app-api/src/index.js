@@ -6,6 +6,7 @@ const cors = require('cors');
 const config = require('./config');
 
 const authRouter = require('./routes/auth');
+const enrollRouter = require('./routes/enroll');
 const devicesRouter = require('./routes/devices');
 const serversRouter = require('./routes/servers');
 const connectRouter = require('./routes/connect');
@@ -48,6 +49,7 @@ app.get('/api/health', (req, res) => {
 
 // Public routes
 app.use('/api/auth', authRouter);
+app.use('/api/enroll', enrollRouter);
 
 // JWT-protected routes
 app.use('/api/devices', jwtAuth, devicesRouter);

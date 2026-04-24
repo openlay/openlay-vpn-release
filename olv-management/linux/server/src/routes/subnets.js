@@ -173,6 +173,17 @@ router.delete('/:subnetId', async (req, res) => {
     if (toDelete.length === 0) return res.status(404).json({ error: 'Subnet not found' });
     const ifaceName = toDelete[0].interface_name;
 
+    // Block delete if any user is still assigned to this subnet
+    const { rows: assigned } = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM user_server_assignments WHERE subnet_id = $1',
+      [req.params.subnetId]
+    );
+    if (assigned[0].count > 0) {
+      return res.status(409).json({
+        error: `Cannot delete subnet: ${assigned[0].count} user(s) are still assigned to it. Please unassign them first.`,
+      });
+    }
+
     await pool.query(
       'DELETE FROM subnets WHERE id = $1 AND server_id = $2',
       [req.params.subnetId, req.params.serverId]

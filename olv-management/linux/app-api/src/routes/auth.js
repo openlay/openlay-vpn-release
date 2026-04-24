@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { pool } = require('../db/pool');
 const config = require('../config');
 const { verifyAppleIdentityToken } = require('../services/appleAuth');
+const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
 
 // Password verification (scrypt, matches management server)
 async function verifyPassword(password, hash) {
@@ -190,6 +191,74 @@ router.post('/login', async (req, res) => {
     });
   } catch (err) {
     console.error('[auth/login] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/device — SE signature login for enroll-type users
+// body: { deviceId, challenge, signature }
+router.post('/device', async (req, res) => {
+  try {
+    const { deviceId, challenge, signature } = req.body || {};
+    if (!deviceId || !challenge || !signature) {
+      return res.status(400).json({ error: 'deviceId, challenge, and signature are required' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT * FROM devices WHERE id = $1 OR hardware_id = $1',
+      [deviceId]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Device not found' });
+    const device = rows[0];
+
+    if (device.status !== 'enabled') {
+      return res.status(403).json({ error: 'Device is not enabled' });
+    }
+    if (device.last_auth_challenge && device.last_auth_challenge === challenge) {
+      return res.status(401).json({ error: 'Replay detected' });
+    }
+
+    const ok = verifySecureEnclaveSignature(device.public_key, challenge, signature);
+    if (!ok) return res.status(401).json({ error: 'Invalid signature' });
+
+    await pool.query(
+      'UPDATE devices SET last_auth_challenge = $1, last_auth_at = NOW() WHERE id = $2',
+      [challenge, device.id]
+    );
+
+    const { rows: userRows } = await pool.query(
+      'SELECT id, email, name, username, status, auth_type FROM users WHERE id = $1',
+      [device.user_id]
+    );
+    if (userRows.length === 0 || userRows[0].status !== 'enabled') {
+      return res.status(403).json({ error: 'Account not found or disabled' });
+    }
+    const user = userRows[0];
+
+    const token = jwt.sign(
+      { sub: user.id, email: user.email, status: user.status },
+      config.jwtSecret,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        username: user.username,
+        status: user.status,
+        authType: user.auth_type,
+      },
+      device: {
+        id: device.id,
+        name: device.name,
+        status: device.status,
+      },
+    });
+  } catch (err) {
+    console.error('[auth/device] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

@@ -411,15 +411,51 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // M6: client-side local port forwards for this server, filtered by
+    // M6.1 visibility ACL. Each row advertises to the device only if:
+    //   visibility = 'all'                      → everyone gets it
+    //   visibility = 'users' AND user listed    → explicit per-user grant
+    //   visibility = 'groups' AND user in group → user_groups membership
+    let localPortForwards = [];
+    try {
+      const { rows } = await pool.query(
+        `SELECT lpf.local_port AS "localPort",
+                lpf.remote_host AS "remoteHost",
+                lpf.remote_port AS "remotePort",
+                lpf.name
+         FROM server_local_port_forwards lpf
+         WHERE lpf.server_id = $1 AND lpf.enabled = TRUE
+         AND (
+           lpf.visibility = 'all'
+           OR (lpf.visibility = 'users' AND EXISTS (
+                 SELECT 1 FROM server_local_port_forward_users u
+                 WHERE u.port_forward_id = lpf.id AND u.user_id = $2))
+           OR (lpf.visibility = 'groups' AND EXISTS (
+                 SELECT 1 FROM server_local_port_forward_groups g
+                 JOIN user_group_members m ON m.user_group_id = g.user_group_id
+                 WHERE g.port_forward_id = lpf.id AND m.user_id = $2))
+         )
+         ORDER BY lpf.local_port`,
+        [server.id, req.user.id]
+      );
+      localPortForwards = rows;
+    } catch (lpfErr) {
+      // Non-fatal — pre-M6 clients ignore missing field, post-M6 clients
+      // degrade gracefully to "no port forwards" when the table isn't there.
+      console.error('[connect] load server_local_port_forwards failed:', lpfErr.message);
+    }
+
     res.status(201).json({
       peerId: peerMeta[0].id,
       assignedIp: allowedIPs,
+      expiresAt,
       serverPublicKey,
       serverEndpoint: endpoint,
       allowedIPs: deviceAllowedIps ? deviceAllowedIps.join(', ') : '0.0.0.0/0, ::/0',
       dns: dns || '1.1.1.1',
       persistentKeepalive: 25,
       serverName: server.name,
+      localPortForwards,
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

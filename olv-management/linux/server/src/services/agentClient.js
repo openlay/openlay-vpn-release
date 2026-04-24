@@ -20,6 +20,7 @@ class AgentClient {
   // Interfaces
   listInterfaces() { return this.request('listInterfaces'); }
   listInterfacesFast() { return this.request('listInterfaces', {}, 4000); }
+  listAllInterfaces() { return this.request('listAllInterfaces', {}, 5000); }
   getInterface(name) { return this.request('getInterface', { name }); }
   getInterfaceFast(name) { return this.request('getInterface', { name }, 4000); }
   createInterface(data) { return this.request('createInterface', data); }
@@ -72,6 +73,45 @@ class AgentClient {
   firewallAllowPort(iface, port, protocol) { return this.request('firewallAllowPort', { iface, port, protocol }); }
   firewallBlockPeer(iface, peerIP) { return this.request('firewallBlockPeer', { iface, peerIP }); }
   firewallRateLimitPeer(iface, peerIP, rateKbps) { return this.request('firewallRateLimitPeer', { iface, peerIP, rateKbps }); }
+
+  // Router — static routes (M1)
+  routerListRoutes(iface) { return this.request('routerListRoutes', { iface }); }
+  routerGetAllRoutes() { return this.request('routerGetAllRoutes'); }
+  routerAddRoute(iface, route) { return this.request('routerAddRoute', { iface, route }); }
+  routerUpdateRoute(iface, id, patch) { return this.request('routerUpdateRoute', { iface, id, patch }); }
+  routerRemoveRoute(iface, id) { return this.request('routerRemoveRoute', { iface, id }); }
+  routerEnableRoute(iface, id) { return this.request('routerEnableRoute', { iface, id }); }
+  routerDisableRoute(iface, id) { return this.request('routerDisableRoute', { iface, id }); }
+  routerFlushRoutes(iface) { return this.request('routerFlushRoutes', { iface }); }
+  routerListLive(fib) { return this.request('routerListLive', { fib: fib || 0 }); }
+
+  // Router — policy-based routing (M2)
+  routerListPolicies() { return this.request('routerListPolicies'); }
+  routerAddPolicy(policy) { return this.request('routerAddPolicy', { policy }); }
+  routerUpdatePolicy(id, patch) { return this.request('routerUpdatePolicy', { id, patch }); }
+  routerRemovePolicy(id) { return this.request('routerRemovePolicy', { id }); }
+  routerEnablePolicy(id) { return this.request('routerEnablePolicy', { id }); }
+  routerDisablePolicy(id) { return this.request('routerDisablePolicy', { id }); }
+  routerGetFibInfo() { return this.request('routerGetFibInfo'); }
+  routerListLivePolicies() { return this.request('routerListLivePolicies'); }
+
+  // NAT — SNAT (M3)
+  natListRules() { return this.request('natListRules'); }
+  natAddRule(rule) { return this.request('natAddRule', { rule }); }
+  natUpdateRule(id, patch) { return this.request('natUpdateRule', { id, patch }); }
+  natRemoveRule(id) { return this.request('natRemoveRule', { id }); }
+  natEnableRule(id) { return this.request('natEnableRule', { id }); }
+  natDisableRule(id) { return this.request('natDisableRule', { id }); }
+  natListLive(wanIface) { return this.request('natListLive', { wanIface }); }
+  natRebuild() { return this.request('natRebuild'); }
+
+  // NAT — DNAT / port-forward (M3)
+  rdrListRules() { return this.request('rdrListRules'); }
+  rdrAddRule(rule) { return this.request('rdrAddRule', { rule }); }
+  rdrUpdateRule(id, patch) { return this.request('rdrUpdateRule', { id, patch }); }
+  rdrRemoveRule(id) { return this.request('rdrRemoveRule', { id }); }
+  rdrEnableRule(id) { return this.request('rdrEnableRule', { id }); }
+  rdrDisableRule(id) { return this.request('rdrDisableRule', { id }); }
 
   // DNS Filtering — Layer 7
   dnsEnable(iface) { return this.request('dnsEnable', { iface }); }
