@@ -12,20 +12,26 @@ function generateCode() {
 }
 
 /**
- * Read current code. If expired (or missing), rotate it in-place and return
- * the fresh one. Kept in a single advisory-locked transaction so concurrent
- * reads don't double-rotate.
+ * Read current code for the given enterprise. If expired (or missing),
+ * rotate it in-place and return the fresh one. Kept in a single
+ * advisory-locked transaction keyed on (enterprise_id, key) so concurrent
+ * reads serialize during rotation per-enterprise (no global contention).
  */
-async function getOrRotateCode() {
+async function getOrRotateCode(enterpriseId) {
+  if (!enterpriseId) throw new Error('enterpriseId is required');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Advisory lock the settings row so parallel readers serialize during rotation
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [CODE_VALUE_KEY]);
+    // Per-enterprise advisory lock — separate enterprises rotate in parallel.
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      [`${enterpriseId}:${CODE_VALUE_KEY}`]
+    );
 
     const { rows } = await client.query(
-      `SELECT key, value FROM app_settings WHERE key IN ($1, $2)`,
-      [CODE_VALUE_KEY, CODE_EXPIRES_KEY]
+      `SELECT key, value FROM enterprise_settings
+        WHERE enterprise_id = $1 AND key IN ($2, $3)`,
+      [enterpriseId, CODE_VALUE_KEY, CODE_EXPIRES_KEY]
     );
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     const nowMs = Date.now();
@@ -37,16 +43,8 @@ async function getOrRotateCode() {
     if (!code || !expiresAtIso || isNaN(expiresMs) || expiresMs <= nowMs) {
       code = generateCode();
       expiresAtIso = new Date(nowMs + CODE_TTL_MS).toISOString();
-      await client.query(
-        `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [CODE_VALUE_KEY, code]
-      );
-      await client.query(
-        `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [CODE_EXPIRES_KEY, expiresAtIso]
-      );
+      await upsertSetting(client, enterpriseId, CODE_VALUE_KEY, code);
+      await upsertSetting(client, enterpriseId, CODE_EXPIRES_KEY, expiresAtIso);
     }
 
     await client.query('COMMIT');
@@ -64,23 +62,19 @@ async function getOrRotateCode() {
   }
 }
 
-async function forceRotate() {
+async function forceRotate(enterpriseId) {
+  if (!enterpriseId) throw new Error('enterpriseId is required');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [CODE_VALUE_KEY]);
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      [`${enterpriseId}:${CODE_VALUE_KEY}`]
+    );
     const code = generateCode();
     const expiresAtIso = new Date(Date.now() + CODE_TTL_MS).toISOString();
-    await client.query(
-      `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-      [CODE_VALUE_KEY, code]
-    );
-    await client.query(
-      `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-      [CODE_EXPIRES_KEY, expiresAtIso]
-    );
+    await upsertSetting(client, enterpriseId, CODE_VALUE_KEY, code);
+    await upsertSetting(client, enterpriseId, CODE_EXPIRES_KEY, expiresAtIso);
     await client.query('COMMIT');
     return {
       code,
@@ -95,26 +89,68 @@ async function forceRotate() {
   }
 }
 
-function requireGlobalAdmin(req, res, next) {
-  if (req.enterpriseRole === 'root' || req.enterpriseRole === 'super_admin') return next();
-  return res.status(403).json({ error: 'Only root or super_admin can view/rotate the enrollment code' });
+async function upsertSetting(client, enterpriseId, key, value) {
+  await client.query(
+    `INSERT INTO enterprise_settings (enterprise_id, key, value, updated_at)
+       VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (enterprise_id, key)
+       DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [enterpriseId, key, value]
+  );
+}
+
+/**
+ * Reverse lookup used by the public /api/enroll: given a code, find which
+ * enterprise it belongs to (if any) and return that enterprise_id along
+ * with whether the code is still valid. Returns null when no match.
+ */
+async function lookupEnterpriseByCode(code) {
+  if (!code) return null;
+  const { rows } = await pool.query(
+    `SELECT v.enterprise_id, e.value AS expires_at
+       FROM enterprise_settings v
+       JOIN enterprise_settings e
+         ON e.enterprise_id = v.enterprise_id AND e.key = $1
+      WHERE v.key = $2 AND v.value = $3`,
+    [CODE_EXPIRES_KEY, CODE_VALUE_KEY, code]
+  );
+  if (rows.length === 0) return null;
+  const { enterprise_id: enterpriseId, expires_at: expiresAt } = rows[0];
+  const expiresMs = Date.parse(expiresAt);
+  if (!expiresMs || expiresMs <= Date.now()) {
+    return { enterpriseId, expired: true };
+  }
+  return { enterpriseId, expired: false };
+}
+
+// Per-enterprise enrollment code is ops-level — anyone with admin powers in
+// the active enterprise can view/rotate. Members can't.
+function requireEnterpriseAdmin(req, res, next) {
+  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return next();
+  return res.status(403).json({ error: 'Only enterprise admins can view/rotate the enrollment code' });
 }
 
 const router = Router();
 router.use(enterpriseContext);
 
-router.get('/', requireGlobalAdmin, async (req, res) => {
+router.get('/', requireEnterpriseAdmin, async (req, res) => {
   try {
-    const payload = await getOrRotateCode();
+    if (!req.enterpriseId) {
+      return res.status(400).json({ error: 'X-Enterprise-Id header is required' });
+    }
+    const payload = await getOrRotateCode(req.enterpriseId);
     res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/rotate', requireGlobalAdmin, async (req, res) => {
+router.post('/rotate', requireEnterpriseAdmin, async (req, res) => {
   try {
-    const payload = await forceRotate();
+    if (!req.enterpriseId) {
+      return res.status(400).json({ error: 'X-Enterprise-Id header is required' });
+    }
+    const payload = await forceRotate(req.enterpriseId);
     res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -123,3 +159,4 @@ router.post('/rotate', requireGlobalAdmin, async (req, res) => {
 
 module.exports = router;
 module.exports.getOrRotateCode = getOrRotateCode;
+module.exports.lookupEnterpriseByCode = lookupEnterpriseByCode;

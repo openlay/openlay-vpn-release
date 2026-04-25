@@ -14,6 +14,12 @@ const config = require('../config');
  * The assertion signs SHA256(JSON payload including challenge).
  */
 async function appAttest(req, res, next) {
+  // Staging-only escape hatch. Set SKIP_APP_ATTEST=true in the staging .env
+  // so dev work on simulator + Apple sign-in works without iOS hardware.
+  // PRODUCTION MUST NOT SET THIS — production enforces App Attest for
+  // every Apple-related request.
+  if (config.skipAppAttest) return next();
+
   // Skip App Attest for password-authenticated users (they use SE signature instead)
   const { deviceId } = req.body;
   if (deviceId) {

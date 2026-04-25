@@ -106,7 +106,17 @@ router.get('/:id', async (req, res) => {
       alias = aliasRows[0]?.alias || '';
     }
 
-    res.json({ user: { ...users[0], enterprise_alias: alias }, devices, peers, assignments });
+    // All enterprises the user belongs to (id, name, role, alias)
+    const { rows: enterprises } = await pool.query(
+      `SELECT e.id, e.name, e.enterprise_id as public_id, uer.role, uer.alias
+       FROM user_enterprise_roles uer
+       JOIN enterprises e ON e.id = uer.enterprise_id
+       WHERE uer.user_id = $1
+       ORDER BY uer.created_at`,
+      [req.params.id]
+    );
+
+    res.json({ user: { ...users[0], enterprise_alias: alias }, devices, peers, assignments, enterprises });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -7,6 +7,9 @@ module.exports = {
   appleClientIds: (process.env.APPLE_CLIENT_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
   appleTeamId: process.env.APPLE_TEAM_ID || '',
   appAttestProduction: process.env.APP_ATTEST_PRODUCTION === 'true',
+  // Bypass switch for staging only — set via SKIP_APP_ATTEST=true in
+  // staging .env. NEVER set on production.
+  skipAppAttest: process.env.SKIP_APP_ATTEST === 'true',
   // Management server URL (agent operations proxied through it)
   managementUrl: process.env.MANAGEMENT_URL || 'https://localhost:3084',
   // Internal service-to-service key (must match management server's INTERNAL_API_KEY)

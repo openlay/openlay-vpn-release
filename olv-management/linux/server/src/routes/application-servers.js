@@ -1,12 +1,13 @@
-// Admin CRUD for enterprise-scoped Application Servers (post-M6 redesign).
+// Admin CRUD for Application Servers — per-VPN-server scope.
 //
-// Replaces the localhost-bind approach (036/037, dropped in 038). Today this
-// route is just a registry: admin declares (ip, port) + ACL, users query
-// their list via app-api /api/connect (default deny). Future work may wire
-// agent-side firewall enforcement on top of these grants.
+// An Application Server is a registry entry under one VPN server,
+// describing an internal IP:port that some users/groups are entitled
+// to access while VPN'd in. The parent server defines which subnet
+// the IP lives in, so the (ip, port) is only meaningful in that
+// context. ACL grants are scoped to the server's enterprise (or any
+// user/group caller can name when they're root).
 //
-// JSON convention: snake_case on the wire (per repo-wide rule). Backend
-// reads + emits snake_case keys directly.
+// JSON convention: snake_case on the wire (per repo-wide rule).
 const { Router } = require('express');
 const { pool } = require('../db/pool');
 const enterpriseContext = require('../middleware/enterpriseContext');
@@ -14,24 +15,22 @@ const enterpriseContext = require('../middleware/enterpriseContext');
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
 
+async function verifyAccess(serverId, req) {
+  const isRoot = req.enterpriseRole === 'root';
+  const { rows } = isRoot
+    ? await pool.query('SELECT id, access_mode, enterprise_id FROM servers WHERE id = $1', [serverId])
+    : await pool.query(
+        'SELECT id, access_mode, enterprise_id FROM servers WHERE id = $1 AND enterprise_id = $2',
+        [serverId, req.enterpriseId]
+      );
+  if (rows.length === 0) throw Object.assign(new Error('Server not found'), { status: 404 });
+  if (rows[0].access_mode === 'public' && !isRoot) throw Object.assign(new Error('Root required'), { status: 403 });
+  return rows[0];
+}
+
 function requireAdmin(req, res) {
   if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
     res.status(403).json({ error: 'Admin access required' });
-    return false;
-  }
-  return true;
-}
-
-// Ensure caller can act on the given enterprise. Root has free reign;
-// non-root must match req.enterpriseId from middleware.
-function verifyEnterpriseScope(req, res, enterpriseId) {
-  if (req.enterpriseRole === 'root') return true;
-  if (!enterpriseId) {
-    res.status(403).json({ error: 'Root required for global apps' });
-    return false;
-  }
-  if (enterpriseId !== req.enterpriseId) {
-    res.status(403).json({ error: 'Cross-tenant access denied' });
     return false;
   }
   return true;
@@ -55,9 +54,9 @@ async function loadAcl(appIds) {
 }
 
 async function writeAcl(dbClient, appId, userIds, groupIds) {
-  await dbClient.query('DELETE FROM application_server_users WHERE app_id = $1', [appId]);
-  await dbClient.query('DELETE FROM application_server_groups WHERE app_id = $1', [appId]);
+  // Either array (incl. empty) means "replace this side". Undefined means leave alone.
   if (Array.isArray(userIds)) {
+    await dbClient.query('DELETE FROM application_server_users WHERE app_id = $1', [appId]);
     for (const uid of userIds) {
       await dbClient.query(
         'INSERT INTO application_server_users (app_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
@@ -66,6 +65,7 @@ async function writeAcl(dbClient, appId, userIds, groupIds) {
     }
   }
   if (Array.isArray(groupIds)) {
+    await dbClient.query('DELETE FROM application_server_groups WHERE app_id = $1', [appId]);
     for (const gid of groupIds) {
       await dbClient.query(
         'INSERT INTO application_server_groups (app_id, user_group_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
@@ -75,13 +75,13 @@ async function writeAcl(dbClient, appId, userIds, groupIds) {
   }
 }
 
-// GET /api/enterprises/:enterpriseId/application-servers
+// GET /api/servers/:serverId/application-servers
 router.get('/', async (req, res) => {
   try {
-    if (!verifyEnterpriseScope(req, res, req.params.enterpriseId)) return;
+    await verifyAccess(req.params.serverId, req);
     const { rows } = await pool.query(
-      'SELECT * FROM application_servers WHERE enterprise_id = $1 ORDER BY name',
-      [req.params.enterpriseId]
+      'SELECT * FROM application_servers WHERE server_id = $1 ORDER BY name',
+      [req.params.serverId]
     );
     const acl = await loadAcl(rows.map(r => r.id));
     res.json({
@@ -99,7 +99,7 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    if (!verifyEnterpriseScope(req, res, req.params.enterpriseId)) return;
+    await verifyAccess(req.params.serverId, req);
     const b = req.body || {};
     if (!b.name) return res.status(400).json({ error: 'name is required' });
     if (!b.ip) return res.status(400).json({ error: 'ip is required' });
@@ -111,9 +111,9 @@ router.post('/', async (req, res) => {
       await dbClient.query('BEGIN');
       const { rows } = await dbClient.query(
         `INSERT INTO application_servers
-           (enterprise_id, name, description, ip, port, local_port, enabled)
+           (server_id, name, description, ip, port, local_port, enabled)
          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [req.params.enterpriseId, b.name, b.description || null,
+        [req.params.serverId, b.name, b.description || null,
          b.ip, b.port, b.local_port,
          b.enabled === undefined ? true : !!b.enabled]
       );
@@ -127,11 +127,10 @@ router.post('/', async (req, res) => {
     } catch (dbErr) {
       await dbClient.query('ROLLBACK').catch(() => {});
       if (dbErr.code === '23505') {
-        // Disambiguate which UNIQUE failed for a clearer message.
         const isPort = String(dbErr.detail || '').includes('local_port');
         return res.status(409).json({
-          error: isPort ? `local_port ${b.local_port} already used in this enterprise`
-                        : `name "${b.name}" already exists in this enterprise`,
+          error: isPort ? `local_port ${b.local_port} already used on this server`
+                        : `name "${b.name}" already exists on this server`,
         });
       }
       if (dbErr.code === '22P02') return res.status(400).json({ error: 'ip is not a valid INET' });
@@ -148,10 +147,10 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    if (!verifyEnterpriseScope(req, res, req.params.enterpriseId)) return;
+    await verifyAccess(req.params.serverId, req);
     const { rows: existing } = await pool.query(
-      'SELECT * FROM application_servers WHERE id = $1 AND enterprise_id = $2',
-      [req.params.id, req.params.enterpriseId]
+      'SELECT * FROM application_servers WHERE id = $1 AND server_id = $2',
+      [req.params.id, req.params.serverId]
     );
     if (existing.length === 0) return res.status(404).json({ error: 'Application server not found' });
 
@@ -175,10 +174,10 @@ router.put('/:id', async (req, res) => {
       let row = existing[0];
       if (set.length > 0) {
         set.push('updated_at = NOW()');
-        vals.push(req.params.id, req.params.enterpriseId);
+        vals.push(req.params.id, req.params.serverId);
         const { rows } = await dbClient.query(
           `UPDATE application_servers SET ${set.join(', ')}
-           WHERE id = $${idx++} AND enterprise_id = $${idx} RETURNING *`,
+           WHERE id = $${idx++} AND server_id = $${idx} RETURNING *`,
           vals
         );
         row = rows[0];
@@ -205,10 +204,10 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    if (!verifyEnterpriseScope(req, res, req.params.enterpriseId)) return;
+    await verifyAccess(req.params.serverId, req);
     const { rowCount } = await pool.query(
-      'DELETE FROM application_servers WHERE id = $1 AND enterprise_id = $2',
-      [req.params.id, req.params.enterpriseId]
+      'DELETE FROM application_servers WHERE id = $1 AND server_id = $2',
+      [req.params.id, req.params.serverId]
     );
     if (rowCount === 0) return res.status(404).json({ error: 'Application server not found' });
     res.json({ deleted: true });

@@ -67,6 +67,26 @@ router.get('/:iface', async (req, res) => {
   try {
     const { client } = await getClient(req.params.serverId, req);
     const data = await client.getInterface(req.params.iface);
+
+    // Override peer_count to match what the peers list endpoint shows.
+    // The agent counts peers in its on-disk .conf only, but the peers list
+    // also surfaces orphan peers_meta rows (peers tracked in DB but missing
+    // from the agent — happens after agent reinstall/config wipe).
+    // Without this override the Interfaces tab shows "0 peers" while
+    // clicking through reveals many.
+    const agentKeys = new Set(
+      Array.isArray(data.peers)
+        ? data.peers.map(p => p.public_key || p.publicKey).filter(Boolean)
+        : []
+    );
+    const { rows: metaRows } = await pool.query(
+      'SELECT public_key FROM peers_meta WHERE server_id = $1 AND interface_name = $2',
+      [req.params.serverId, req.params.iface]
+    );
+    for (const row of metaRows) agentKeys.add(row.public_key);
+    data.peer_count = agentKeys.size;
+    delete data.peerCount;
+
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

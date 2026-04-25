@@ -432,6 +432,7 @@ router.get('/:id/users', async (req, res) => {
       SELECT usa.id as assignment_id, usa.interface_name, usa.subnet_id,
         u.id as user_id, u.name as user_name, u.email as user_email, u.status as user_status,
         uer.alias as enterprise_alias,
+        (uer.user_id IS NOT NULL) as in_enterprise,
         sub.cidr as subnet_cidr, sub.name as subnet_name
       FROM user_server_assignments usa
       JOIN users u ON usa.user_id = u.id

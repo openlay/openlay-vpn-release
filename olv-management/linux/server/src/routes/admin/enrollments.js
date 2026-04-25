@@ -6,21 +6,29 @@ const router = Router();
 router.use(enterpriseContext);
 
 // GET /api/admin/enrollments?status=pending|approved|rejected|all
-// All admins see every pending/approved/rejected row. Enterprise scoping is
-// applied on approve (admin picks their enterprise from a UI list). Pending
-// rows have enterprise_id = NULL; approved rows reveal the chosen one.
+// Codes are per-enterprise → every enrollment_request is stamped with its
+// enterprise_id at filing time. We scope the list to req.enterpriseId so an
+// admin only sees their own enterprise's queue. Root sees everything when
+// no enterprise header is set, or the chosen one when set.
 router.get('/', async (req, res) => {
   try {
     const status = req.query.status || 'pending';
+    const where = [];
     const params = [];
-    let where = '';
     if (status !== 'all') {
       if (!['pending', 'approved', 'rejected'].includes(status)) {
         return res.status(400).json({ error: 'status must be pending, approved, rejected, or all' });
       }
       params.push(status);
-      where = `WHERE status = $${params.length}`;
+      where.push(`status = $${params.length}`);
     }
+    // Scope: non-root callers only see their enterprise. Root with header
+    // set scopes to that one; root without header sees the whole table.
+    if (req.enterpriseRole !== 'root' || req.enterpriseId) {
+      params.push(req.enterpriseId);
+      where.push(`enterprise_id = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const { rows } = await pool.query(
       `SELECT id, enterprise_id AS "assignedEnterpriseId",
               device_name AS "deviceName", hardware_id AS "hardwareId",
@@ -28,7 +36,7 @@ router.get('/', async (req, res) => {
               approved_device_id AS "approvedDeviceId",
               approved_user_id AS "approvedUserId",
               created_at AS "createdAt", updated_at AS "updatedAt"
-       FROM enrollment_requests ${where}
+       FROM enrollment_requests ${whereSql}
        ORDER BY created_at DESC`,
       params
     );
@@ -49,23 +57,18 @@ function slugifyUsername(name) {
   return base;
 }
 
-// POST /api/admin/enrollments/:id/approve   body: { enterpriseId }
+// POST /api/admin/enrollments/:id/approve
+// body: { enterprise_id?, server_id?, interface_name?, subnet_id? }
+// enterprise_id is optional — when omitted we use the enterprise the
+// enrollment was filed against (the code identifies the enterprise on
+// /api/enroll, so it's pre-stamped). Admin can still override to re-route.
+// server_id + interface_name (optional) creates a user_server_assignment
+// in the same transaction so approve is one atomic step.
 router.post('/:id/approve', async (req, res) => {
-  const enterpriseId = req.body.enterpriseId || req.body.enterprise_id;
-  if (!enterpriseId) {
-    return res.status(400).json({ error: 'enterpriseId is required' });
-  }
-
-  // Admin must have a role in the target enterprise (root bypasses).
-  if (req.enterpriseRole !== 'root') {
-    const { rows } = await pool.query(
-      'SELECT role FROM user_enterprise_roles WHERE user_id = $1 AND enterprise_id = $2',
-      [req.user.id, enterpriseId]
-    );
-    if (rows.length === 0) {
-      return res.status(403).json({ error: 'No access to this enterprise' });
-    }
-  }
+  const overrideEnterpriseId = req.body.enterprise_id || req.body.enterpriseId || null;
+  const assignServerId = req.body.server_id || req.body.serverId || null;
+  const assignInterfaceName = req.body.interface_name || req.body.interfaceName || null;
+  const assignSubnetId = req.body.subnet_id || req.body.subnetId || null;
 
   const client = await pool.connect();
   try {
@@ -83,6 +86,28 @@ router.post('/:id/approve', async (req, res) => {
     if (enrollment.status !== 'pending') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: `Enrollment is already ${enrollment.status}` });
+    }
+
+    // Use the override if admin passed one, else fall back to the request's
+    // pre-stamped enterprise (set on /api/enroll based on the code).
+    const enterpriseId = overrideEnterpriseId || enrollment.enterprise_id;
+    if (!enterpriseId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'enrollment has no enterprise — pass enterpriseId in body to assign one',
+      });
+    }
+
+    // Admin must have a role in the target enterprise (root bypasses).
+    if (req.enterpriseRole !== 'root') {
+      const { rows: roleRows } = await client.query(
+        'SELECT role FROM user_enterprise_roles WHERE user_id = $1 AND enterprise_id = $2',
+        [req.user.id, enterpriseId]
+      );
+      if (roleRows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'No access to this enterprise' });
+      }
     }
 
     // Find a free username: slug, slug-2, slug-3, ... until unique.
@@ -144,8 +169,31 @@ router.post('/:id/approve', async (req, res) => {
       [enterpriseId, deviceId, userId, enrollment.id]
     );
 
+    // Optional: assign user to a server's interface in same transaction.
+    let assignmentId = null;
+    if (assignServerId && assignInterfaceName) {
+      // Verify server belongs to this enterprise (or root override).
+      const serverCheck = req.enterpriseRole === 'root'
+        ? await client.query('SELECT 1 FROM servers WHERE id = $1', [assignServerId])
+        : await client.query(
+            'SELECT 1 FROM servers WHERE id = $1 AND enterprise_id = $2',
+            [assignServerId, enterpriseId]
+          );
+      if (serverCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Server not found or not in this enterprise' });
+      }
+      const { rows: assignRows } = await client.query(
+        `INSERT INTO user_server_assignments (user_id, server_id, interface_name, subnet_id)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [userId, assignServerId, assignInterfaceName, assignSubnetId]
+      );
+      assignmentId = assignRows[0].id;
+    }
+
     await client.query('COMMIT');
-    res.json({ deviceId, userId, enterpriseId });
+    res.json({ deviceId, userId, enterpriseId, assignmentId });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });

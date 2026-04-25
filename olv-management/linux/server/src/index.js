@@ -168,6 +168,9 @@ function startServer(sslOptions) {
     console.log(`OpenLayVPN Management API running on https://0.0.0.0:${config.port}`);
     console.log(`WebSocket agent endpoint: wss://0.0.0.0:${config.port}/ws/agent`);
   });
+
+  // Daily posture-history retention prune (controlled by app_settings.posture_retention_days).
+  require('./services/postureCleanup').start();
 }
 
 start();

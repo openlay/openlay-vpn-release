@@ -11,6 +11,7 @@ const devicesRouter = require('./routes/devices');
 const serversRouter = require('./routes/servers');
 const connectRouter = require('./routes/connect');
 const attestRouter = require('./routes/attest');
+const configRouter = require('./routes/config');
 const jwtAuth = require('./middleware/jwtAuth');
 const appAttest = require('./middleware/appAttest');
 
@@ -55,6 +56,7 @@ app.use('/api/enroll', enrollRouter);
 app.use('/api/devices', jwtAuth, devicesRouter);
 app.use('/api/servers', jwtAuth, serversRouter);
 app.use('/api/attest', jwtAuth, attestRouter);
+app.use('/api/config', jwtAuth, configRouter);
 app.use('/api/connect', jwtAuth, appAttest, connectRouter);
 
 // Error handler
