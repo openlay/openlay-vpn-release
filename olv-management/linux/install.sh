@@ -85,9 +85,57 @@ echo "==========================================="
 echo ""
 
 # ---------------------------------------------------------------------------
+# Server address — domain or IP that the iOS app will connect to.
+# We auto-detect the public IP and let the user accept it or override with a
+# domain. The address gets baked into the TLS cert CN and the bootstrap QR,
+# so getting it right up-front saves a re-install later.
+# ---------------------------------------------------------------------------
+detect_public_ip() {
+  local ip=""
+  for url in https://api.ipify.org https://ifconfig.me https://checkip.amazonaws.com; do
+    ip=$(curl -fsS --max-time 4 "$url" 2>/dev/null | tr -d '\r\n[:space:]')
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "$ip"; return; fi
+  done
+  # Fallback: first non-loopback IPv4 on this host
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo "$ip"
+}
+
+if [ -z "$DOMAIN" ]; then
+  echo "Detecting server address..."
+  DETECTED_IP=$(detect_public_ip)
+  if [ -n "$DETECTED_IP" ]; then
+    info "  Detected public address: ${DETECTED_IP}"
+  else
+    warn "  Could not auto-detect a public IP."
+  fi
+
+  # If non-interactive, accept detection silently. Interactive: confirm or replace.
+  if [ ! -t 0 ] && [ ! -r /dev/tty ]; then
+    DOMAIN="${DETECTED_IP:-localhost}"
+  else
+    while true; do
+      if [ -n "$DETECTED_IP" ]; then
+        read -rp "$(echo -e "${CYAN}?${NC}") Use this address, or enter a domain/IP [${DETECTED_IP}]: " input < /dev/tty
+        DOMAIN="${input:-$DETECTED_IP}"
+      else
+        read -rp "$(echo -e "${CYAN}?${NC}") Server domain or IP: " DOMAIN < /dev/tty
+      fi
+      # Strip any scheme/port/path the user may have pasted.
+      DOMAIN="${DOMAIN#http://}"
+      DOMAIN="${DOMAIN#https://}"
+      DOMAIN="${DOMAIN%%/*}"
+      DOMAIN="${DOMAIN%%:*}"
+      if [ -n "$DOMAIN" ]; then break; fi
+      warn "  Address is required."
+    done
+  fi
+  info "  Using server address: ${DOMAIN}"
+fi
+
+# ---------------------------------------------------------------------------
 # Interactive prompts (skipped if value passed via CLI args)
 # ---------------------------------------------------------------------------
-ask DOMAIN        "Domain name (e.g. mng.livevpn.com)" ""
 ask DB_NAME       "Database name" "olv_management"
 ask DB_URL        "PostgreSQL URL" "postgres://${SERVICE_USER}@127.0.0.1:5432/${DB_NAME}"
 ask JWT_SECRET    "JWT secret (leave blank to auto-generate)" ""
@@ -129,6 +177,20 @@ if ! command -v openssl &>/dev/null; then
     yum install -y openssl 2>/dev/null || dnf install -y openssl
   else
     error "Cannot install OpenSSL. Install manually and re-run."
+  fi
+fi
+
+# qrencode is required to render the bootstrap QR code in the terminal at the
+# end of install. Best-effort — if install fails we still print the URL+token.
+if ! command -v qrencode &>/dev/null; then
+  warn "qrencode not found. Installing..."
+  if command -v apt-get &>/dev/null; then
+    apt-get install -y -qq qrencode 2>/dev/null || true
+  elif command -v dnf &>/dev/null; then
+    dnf install -y qrencode 2>/dev/null || true
+  elif command -v yum &>/dev/null; then
+    yum install -y epel-release 2>/dev/null || true
+    yum install -y qrencode 2>/dev/null || true
   fi
 fi
 
@@ -265,6 +327,12 @@ done
 info "[7/10] Creating configuration files..."
 
 MGMT_API_TOKEN=$(openssl rand -base64 32 | tr -d '=/+' | head -c 40)
+# One-shot token consumed by the iOS app via /api/setup/root-enroll. Embedded
+# in the bootstrap QR; kept readable by the service user since the server
+# reads it from .env on startup. Stays in .env even after consumption — the
+# server itself flips inert once a root row exists, so the token's no longer
+# usable regardless.
+ROOT_SETUP_TOKEN=$(openssl rand -base64 32 | tr -d '=/+' | head -c 40)
 
 if [ ! -f "$MGMT_DIR/.env" ]; then
   cat > "$MGMT_DIR/.env" << ENVEOF
@@ -275,12 +343,21 @@ APPLE_CLIENT_IDS=${APPLE_CLIENT_IDS}
 APPLE_TEAM_ID=${APPLE_TEAM_ID}
 MANAGEMENT_API_TOKEN=${MGMT_API_TOKEN}
 INTERNAL_API_KEY=${MGMT_API_TOKEN}
+ROOT_SETUP_TOKEN=${ROOT_SETUP_TOKEN}
 TLS_CERT_DIR=./certs
 ENVEOF
   info "  Management .env created"
 else
   info "  Management .env exists — preserving"
   MGMT_API_TOKEN=$(grep MANAGEMENT_API_TOKEN "$MGMT_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+  EXISTING_SETUP_TOKEN=$(grep '^ROOT_SETUP_TOKEN=' "$MGMT_DIR/.env" 2>/dev/null | cut -d'=' -f2-)
+  if [ -n "$EXISTING_SETUP_TOKEN" ]; then
+    ROOT_SETUP_TOKEN="$EXISTING_SETUP_TOKEN"
+  else
+    # Older install — no setup token line yet. Append one so the bootstrap
+    # flow keeps working on upgrades to a server that hasn't enrolled root.
+    echo "ROOT_SETUP_TOKEN=${ROOT_SETUP_TOKEN}" >> "$MGMT_DIR/.env"
+  fi
 fi
 
 if [ ! -f "$APP_API_DIR/.env" ]; then
@@ -432,10 +509,82 @@ echo "==========================================="
 echo -e "${GREEN}Installation complete!${NC}"
 echo "==========================================="
 echo ""
-echo "  Management:  https://${DOMAIN:-localhost}:3084"
-echo "  App API:     https://${DOMAIN:-localhost}:443"
+echo "  Management:  https://${DOMAIN}:3084"
+echo "  App API:     https://${DOMAIN}:443"
 echo ""
 echo "  Status:      systemctl status ${MGMT_SERVICE} ${APP_API_SERVICE}"
 echo "  Mgmt logs:   journalctl -u ${MGMT_SERVICE} -f"
 echo "  API logs:    journalctl -u ${APP_API_SERVICE} -f"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Bootstrap QR — show only if no root user exists yet. Once enrolled the
+# server's /api/setup/status flips has_root=true and we skip the prompt on
+# subsequent re-runs of install.sh (e.g. upgrades).
+# ---------------------------------------------------------------------------
+MGMT_URL="https://${DOMAIN}:3084"
+SETUP_STATUS_URL="${MGMT_URL}/api/setup/status"
+
+# Wait briefly for the server to come up before probing /api/setup/status.
+SETUP_STATUS=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  SETUP_STATUS=$(curl -fsSk --max-time 3 "$SETUP_STATUS_URL" 2>/dev/null || true)
+  if [ -n "$SETUP_STATUS" ]; then break; fi
+  sleep 1
+done
+
+# If we couldn't reach the server, still print enrollment info — the user can
+# scan the QR once the service is up.
+HAS_ROOT="false"
+if echo "$SETUP_STATUS" | grep -q '"has_root":true'; then
+  HAS_ROOT="true"
+fi
+
+if [ "$HAS_ROOT" = "true" ]; then
+  info "Root user already enrolled — skipping bootstrap QR."
+else
+  QR_PAYLOAD=$(printf '{"type":"olv-management-setup","url":"%s","setup_token":"%s"}' \
+    "$MGMT_URL" "$ROOT_SETUP_TOKEN")
+
+  echo "==========================================="
+  echo -e "${GREEN}  Enroll the first root user${NC}"
+  echo "==========================================="
+  echo ""
+  echo "  1. Open the OpenLay Management iOS app"
+  echo "  2. Tap 'Scan Setup QR' on the login screen"
+  echo "  3. Scan the QR below — you'll be prompted to sign in with Apple"
+  echo ""
+
+  if command -v qrencode &>/dev/null; then
+    qrencode -t ANSIUTF8 -m 1 "$QR_PAYLOAD"
+  else
+    warn "  qrencode not installed — paste the URL + token manually:"
+  fi
+
+  echo ""
+  echo "  Server URL:  ${MGMT_URL}"
+  echo "  Setup token: ${ROOT_SETUP_TOKEN}"
+  echo ""
+  echo "  Waiting for enrollment (Ctrl+C to skip)..."
+
+  # Poll /api/setup/status until has_root=true or user gives up. Cap at
+  # ~30min so the install script doesn't hang a forgotten terminal.
+  POLL_SECONDS=0
+  POLL_MAX=1800
+  while [ "$POLL_SECONDS" -lt "$POLL_MAX" ]; do
+    sleep 3
+    POLL_SECONDS=$((POLL_SECONDS + 3))
+    STATUS=$(curl -fsSk --max-time 3 "$SETUP_STATUS_URL" 2>/dev/null || true)
+    if echo "$STATUS" | grep -q '"has_root":true'; then
+      echo ""
+      info "Root user enrolled successfully. You can now log in from the iOS app."
+      break
+    fi
+  done
+  if [ "$POLL_SECONDS" -ge "$POLL_MAX" ]; then
+    echo ""
+    warn "  Stopped polling after 30 minutes. The setup token stays valid until"
+    warn "  someone enrolls — re-print it with: grep ROOT_SETUP_TOKEN ${MGMT_DIR}/.env"
+  fi
+fi
 echo ""

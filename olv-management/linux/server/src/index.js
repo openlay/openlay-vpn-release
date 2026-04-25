@@ -29,8 +29,9 @@ const routePoliciesRouter = require('./routes/route-policies');
 const natRouter = require('./routes/nat');
 const portForwardsRouter = require('./routes/port-forwards');
 const sitesRouter = require('./routes/sites');
-const localPortForwardsRouter = require('./routes/local-port-forwards');
+const applicationServersRouter = require('./routes/application-servers');
 const migrateRouter = require('./routes/migrate');
+const setupRouter = require('./routes/setup');
 const caManager = require('./services/caManager');
 const { startExpiryChecker } = require('./services/expiryChecker');
 
@@ -54,13 +55,14 @@ app.use('/api/servers/:serverId/route-policies', routePoliciesRouter);
 app.use('/api/servers/:serverId/nat', natRouter);
 app.use('/api/servers/:serverId/port-forwards', portForwardsRouter);
 app.use('/api/servers/:serverId/sites', sitesRouter);
-app.use('/api/servers/:serverId/local-port-forwards', localPortForwardsRouter);
+app.use('/api/enterprises/:enterpriseId/application-servers', applicationServersRouter);
 // POST /api/servers/:destId/migrate-from/:sourceId — root-only server clone.
 app.use('/api/servers/:destId/migrate-from', migrateRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/setup', setupRouter);
 app.use('/api/enterprises', enterprisesRouter);
 app.use('/api/enrollment', enrollmentRouter);
 app.use('/api', userGroupsRouter);
