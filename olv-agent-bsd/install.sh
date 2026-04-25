@@ -1,5 +1,5 @@
 #!/bin/sh
-# OpenLay VPN agent installer for FreeBSD 13.2+.
+# OpenLay VPN agent installer for FreeBSD 14.4-RELEASE.
 # Run as root. Idempotent — safe to re-run after an upgrade.
 #
 # Three ways to invoke:

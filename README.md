@@ -92,7 +92,7 @@ See [olv-management/linux/README.md](olv-management/linux/README.md) for detaile
 
 ## 2. VPN Agent (FreeBSD)
 
-Static Go binary for FreeBSD 13.2+ using kernel `if_wg` + pf. No Docker, no Node runtime — one binary under `/usr/local/sbin/olv-agent` managed by rc.d.
+Static Go binary for **FreeBSD 14.4-RELEASE** (amd64 / arm64) using kernel `if_wg` + pf. No Docker, no Node runtime — one binary under `/usr/local/sbin/olv-agent` managed by rc.d.
 
 ### Quick Install
 
@@ -182,6 +182,6 @@ sh ./install.sh
 | Package | OS | Dependencies |
 |---------|-----|-------------|
 | olv-management | Rocky 8/9, RHEL 8/9, Ubuntu 20.04+ | Node.js, PostgreSQL (auto-installed) |
-| olv-agent-bsd | FreeBSD 13.2+ (amd64 / arm64) | `wireguard-tools`, `ca_root_nss` (auto via `pkg`), kernel `if_wg`, pf |
+| olv-agent-bsd | FreeBSD 14.4-RELEASE (amd64 / arm64) | `wireguard-tools`, `ca_root_nss` (auto via `pkg`), kernel `if_wg`, pf |
 
 All require root access and internet connection. FreeBSD base has no `sudo` — run the agent installer as root directly.

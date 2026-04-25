@@ -1,8 +1,9 @@
 # OpenLay VPN Agent (FreeBSD)
 
-Static Go binary port of the VPN agent. Runs on **FreeBSD 13.2+** with
-kernel `if_wg` + pf. One binary, no runtime dependencies beyond
-`wireguard-tools` (for `wg` / `wg-quick`) and `pfctl` (in base).
+Static Go binary port of the VPN agent. Runs on **FreeBSD 14.4-RELEASE**
+(amd64 / arm64) with kernel `if_wg` + pf. One binary, no runtime
+dependencies beyond `wireguard-tools` (for `wg` / `wg-quick`) and
+`pfctl` (in base).
 
 ## Install
 

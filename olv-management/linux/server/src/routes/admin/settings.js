@@ -17,6 +17,14 @@ const SETTING_DEFAULTS = {
     defaultValue: process.env.NODE_ENV === 'development' ? '0.25' : '24',
     description: 'Hours before a newly issued peer key expires (0 = never). Dev default 0.25h (15m), prod 24h.',
   },
+  posture_submission_enabled: {
+    defaultValue: 'false',
+    description: 'When enabled, devices submit posture snapshots (OS, model, security state) on the configured interval',
+  },
+  posture_submission_interval_seconds: {
+    defaultValue: '300',
+    description: 'Interval in seconds between device posture submissions (minimum enforced client-side: 60)',
+  },
 };
 
 // GET /api/admin/settings — per-enterprise settings

@@ -182,15 +182,21 @@ fi
 
 # qrencode is required to render the bootstrap QR code in the terminal at the
 # end of install. Best-effort — if install fails we still print the URL+token.
+# On RHEL-family (Rocky/Alma/RHEL) qrencode lives in EPEL, so enable EPEL
+# first; dnf/yum without EPEL just say "No match for argument: qrencode".
 if ! command -v qrencode &>/dev/null; then
   warn "qrencode not found. Installing..."
   if command -v apt-get &>/dev/null; then
     apt-get install -y -qq qrencode 2>/dev/null || true
   elif command -v dnf &>/dev/null; then
-    dnf install -y qrencode 2>/dev/null || true
+    # On RHEL/Rocky 9 the epel-release package ships with enabled=0, so the
+    # plain `dnf install qrencode` after it still misses. Pass --enablerepo
+    # to force EPEL on for this one transaction.
+    dnf install -y epel-release 2>/dev/null || true
+    dnf --enablerepo=epel install -y qrencode 2>/dev/null || true
   elif command -v yum &>/dev/null; then
     yum install -y epel-release 2>/dev/null || true
-    yum install -y qrencode 2>/dev/null || true
+    yum --enablerepo=epel install -y qrencode 2>/dev/null || true
   fi
 fi
 
@@ -481,6 +487,14 @@ info "[10/10] Starting services..."
 
 chmod 755 "$HOME_DIR" "$MGMT_DIR" "$APP_API_DIR" "$MGMT_DIR/server" 2>/dev/null || true
 restorecon -R "$HOME_DIR" 2>/dev/null || true
+
+# When SELinux is enforcing the .env files inherit user_home_t (and
+# restorecon above will keep resetting them), which systemd refuses to read
+# as EnvironmentFile. Re-label after restorecon so the override sticks for
+# the actual service start below.
+if command -v chcon &>/dev/null; then
+  chcon -t systemd_unit_file_t "$MGMT_DIR/.env" "$APP_API_DIR/.env" 2>/dev/null || true
+fi
 
 set +e
 if command -v getenforce &>/dev/null && [ "$(getenforce)" = "Enforcing" ]; then

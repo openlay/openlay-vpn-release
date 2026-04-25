@@ -343,6 +343,54 @@ async function triggerStaticIpResync(serverId, deviceId) {
   }
 }
 
+// GET /api/admin/devices/:id/postures — paginated posture history
+router.get('/:id/postures', async (req, res) => {
+  try {
+    if (!(await verifyDeviceAccess(req.params.id, req))) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    const limit = Math.min(parseInt(req.query.limit || '50', 10) || 50, 200);
+    const before = req.query.before;
+    const params = [req.params.id];
+    let where = 'device_id = $1';
+    if (before) {
+      params.push(before);
+      where += ` AND submitted_at < $${params.length}`;
+    }
+    params.push(limit);
+    const { rows } = await pool.query(
+      `SELECT id, device_id, submitted_at, posture, platform, os_version, app_version,
+              is_jailbroken, is_disk_encrypted, is_passcode_set
+       FROM device_postures WHERE ${where}
+       ORDER BY submitted_at DESC LIMIT $${params.length}`,
+      params
+    );
+    res.json({ postures: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/devices/:id/postures/latest — most recent snapshot
+router.get('/:id/postures/latest', async (req, res) => {
+  try {
+    if (!(await verifyDeviceAccess(req.params.id, req))) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, device_id, submitted_at, posture, platform, os_version, app_version,
+              is_jailbroken, is_disk_encrypted, is_passcode_set
+       FROM device_postures WHERE device_id = $1
+       ORDER BY submitted_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'No posture for this device' });
+    res.json({ posture: rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/admin/devices/:id
 router.delete('/:id', async (req, res) => {
   try {

@@ -55,7 +55,7 @@ app.use('/api/servers/:serverId/route-policies', routePoliciesRouter);
 app.use('/api/servers/:serverId/nat', natRouter);
 app.use('/api/servers/:serverId/port-forwards', portForwardsRouter);
 app.use('/api/servers/:serverId/sites', sitesRouter);
-app.use('/api/enterprises/:enterpriseId/application-servers', applicationServersRouter);
+app.use('/api/servers/:serverId/application-servers', applicationServersRouter);
 // POST /api/servers/:destId/migrate-from/:sourceId — root-only server clone.
 app.use('/api/servers/:destId/migrate-from', migrateRouter);
 app.use('/api/dashboard', dashboardRouter);
