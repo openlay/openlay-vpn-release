@@ -1,0 +1,1092 @@
+openapi: 3.0.3
+info:
+  title: WireGuard App Client API
+  description: |
+    Public API cho iOS/macOS/Windows/Android app client kết nối WireGuard VPN.
+
+    ## Authentication
+    - Đăng nhập qua **Sign in with Apple** để nhận JWT token (30 ngày).
+    - Tất cả endpoint trừ `/api/auth/*` và `/api/health` yêu cầu `Authorization: Bearer <token>`.
+
+    ## Flow
+    1. `GET /api/auth/me` → check token còn hợp lệ không (mở app lại)
+    2. `POST /api/auth/apple` → nhận JWT (login lần đầu hoặc token hết hạn)
+    3. `POST /api/devices` → đăng ký device (Secure Enclave public key)
+    4. `GET /api/attest/challenge` → lấy challenge
+    5. `POST /api/attest/verify` → gửi attestation từ `DCAppAttestService` (1 lần per device)
+    6. `GET /api/servers` → xem danh sách server VPN
+    7. `GET /api/attest/challenge` → lấy challenge mới
+    8. `POST /api/connect` → tạo WireGuard peer (cần App Attest assertion headers)
+    9. `GET /api/connect/status` → xem trạng thái kết nối
+
+    ## App Attest (iOS only)
+    `POST /api/connect` yêu cầu **Apple App Attest assertion** cho **iOS devices**.
+    macOS không hỗ trợ `DCAppAttestService` nên được skip.
+    - iOS device phải được attest trước qua `/api/attest/verify` (1 lần duy nhất)
+    - Mỗi lần gọi `/api/connect` từ iOS cần: challenge mới + assertion headers
+    - macOS gọi `/api/connect` bình thường không cần attest headers
+  version: 1.0.0
+  contact:
+    name: WireGuard Management
+
+servers:
+  - url: https://localhost
+    description: Local development (self-signed)
+  - url: https://api.example.com
+    description: Production
+
+tags:
+  - name: Health
+    description: Health check
+  - name: Auth
+    description: Authentication (Sign in with Apple)
+  - name: Devices
+    description: Device management
+  - name: App Attest
+    description: Apple App Attest (device attestation & assertion)
+  - name: Servers
+    description: VPN server listing
+  - name: Connect
+    description: WireGuard VPN connection
+  - name: Config
+    description: Client-facing config (feature flags from server)
+  - name: Posture
+    description: Device posture submission (gated by enterprise setting)
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token from `/api/auth/apple`
+
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: Something went wrong
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        email:
+          type: string
+          format: email
+          nullable: true
+          example: "user@icloud.com"
+        name:
+          type: string
+          nullable: true
+          example: "Nguyen Van A"
+        status:
+          type: string
+          enum: [enabled, disabled]
+          example: enabled
+
+    Device:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "d1e2f3a4-b5c6-7890-abcd-ef1234567890"
+        name:
+          type: string
+          example: "iPhone 15 Pro"
+        os:
+          type: string
+          enum: [macos, ios, windows, android]
+          example: ios
+        os_version:
+          type: string
+          example: "17.4"
+        public_key:
+          type: string
+          format: byte
+          description: Base64-encoded Secure Enclave P-256 public key (65 bytes uncompressed)
+          example: "BFy1..."
+        status:
+          type: string
+          enum: [pending, enabled, disabled]
+          example: enabled
+        user_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ServerInfo:
+      type: object
+      properties:
+        serverId:
+          type: integer
+          example: 1
+        serverName:
+          type: string
+          example: "SG-01"
+        interfaceName:
+          type: string
+          example: "wg0"
+        subnetId:
+          type: integer
+          example: 1
+        subnetCidr:
+          type: string
+          example: "10.0.0.0/24"
+        subnetName:
+          type: string
+          example: "Default subnet"
+        accessMode:
+          type: string
+          enum: [public, private]
+          example: public
+
+    ConnectionConfig:
+      type: object
+      properties:
+        peerId:
+          type: integer
+          description: Peer metadata ID
+          example: 42
+        assignedIp:
+          type: string
+          description: IP address assigned to this peer
+          example: "10.0.0.5/32"
+        serverPublicKey:
+          type: string
+          format: byte
+          description: WireGuard server public key (Curve25519, base64)
+          example: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+        serverEndpoint:
+          type: string
+          description: "Server hostname:port"
+          example: "vpn-sg.example.com:51820"
+        allowedIPs:
+          type: string
+          description: |
+            Comma-separated CIDR ranges that should be routed through the VPN tunnel.
+            Client MUST use this value for the peer's `AllowedIPs` in WireGuard config.
+
+            - Default (no admin config): subnet gateway `/32`, e.g. `"10.0.0.1/32"`
+            - Admin configured: custom routes, e.g. `"10.0.0.0/8, 192.168.1.0/24"`
+          example: "10.0.0.1/32"
+        dns:
+          type: string
+          description: DNS server
+          example: "1.1.1.1"
+        persistentKeepalive:
+          type: integer
+          description: Keepalive interval in seconds
+          example: 25
+        serverName:
+          type: string
+          description: Human-readable server name
+          example: "SG-01"
+
+    Connection:
+      type: object
+      properties:
+        peerId:
+          type: integer
+        serverName:
+          type: string
+          example: "SG-01"
+        interfaceName:
+          type: string
+          example: "wg0"
+        publicKey:
+          type: string
+          format: byte
+          description: WireGuard public key of this peer
+        deviceName:
+          type: string
+          nullable: true
+          example: "iPhone 15 Pro"
+        deviceOs:
+          type: string
+          nullable: true
+          enum: [macos, ios, windows, android]
+        alias:
+          type: string
+          example: "user@icloud.com/iPhone 15 Pro"
+        createdAt:
+          type: string
+          format: date-time
+        isExpired:
+          type: boolean
+        connected:
+          type: boolean
+          description: true if latest handshake < 180 seconds ago
+        latestHandshake:
+          type: number
+          nullable: true
+          description: Unix timestamp of latest WireGuard handshake
+
+    ClientConfig:
+      type: object
+      description: Feature flags + tunables the client polls before doing optional work.
+      properties:
+        posture:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              description: Whether device posture submission is enabled for this user's enterprise.
+              example: false
+            interval_seconds:
+              type: integer
+              minimum: 60
+              description: Cadence at which the client should POST posture snapshots.
+              example: 300
+
+    DevicePostureSubmit:
+      type: object
+      description: |
+        Snapshot of device posture. Schema is intentionally open — clients
+        send every fact they can collect; the server stores the full payload
+        as JSONB and extracts a known subset into typed columns so the admin
+        compliance dashboard can filter without scanning JSON. All keys are
+        snake_case.
+
+        Promoted columns (typed + indexed server-side; send when applicable):
+
+        **Identity** — `platform` (`ios` | `macos` | `windows` | `linux`),
+        `os_version`, `os_build`, `kernel_release`, `app_version`,
+        `app_build`, `device_model`, `device_name`, `hostname`,
+        `hardware_model`, `hardware_serial`, `hardware_id`.
+
+        **Build flavour** — `is_simulator`, `is_debug_build`,
+        `is_developer_mode`.
+
+        **Identity / lock factors** — `is_passcode_set`,
+        `is_biometry_enabled`, `biometry_type` (`face_id` | `touch_id` |
+        `none`), `is_root`.
+
+        **Power & runtime** — `uptime_seconds`, `thermal_state`
+        (`nominal` | `fair` | `serious` | `critical`), `is_low_power_mode`,
+        `is_charging`, `battery_level` (0.0–1.0), `battery_state`.
+
+        **Storage / memory** — `free_disk_bytes`, `total_disk_bytes`,
+        `physical_memory_bytes`, `free_memory_bytes`.
+
+        **Locale** — `locale`, `timezone`.
+
+        **Security — cross-platform** — `is_jailbroken`,
+        `is_disk_encrypted`, `is_secure_boot_on`, `is_tpm_present`,
+        `antivirus_name` (string — product label, e.g. "CrowdStrike Falcon",
+        "ClamAV", "Windows Defender"), `antivirus_enabled` (bool — best-effort:
+        true when there's a strong signal the agent is running, false when
+        only an installed binary is found, null when nothing is detected),
+        `antivirus_up_to_date` (bool — null unless the AV exposes a
+        signature-freshness API, currently only Windows via WMI).
+
+        **macOS-specific** — `is_filevault_on`, `is_sip_enabled`,
+        `is_gatekeeper_on`, `mdm_enrolled`, `is_xprotect_on` (bool — Apple's
+        built-in malware scanner; always true on supported macOS),
+        `xprotect_version` (string — definitions version).
+
+        **Linux-specific** — `selinux_status` (`enforcing` | `permissive` |
+        `disabled`), `apparmor_enabled`, `firewall_state` (`firewalld` |
+        `ufw` | `nftables` | `iptables`), `process_count`.
+
+        **Windows-specific** — `is_bitlocker_on`, `defender_state`,
+        `uac_enabled`, `domain_joined`.
+
+        Anything else stays in the JSONB column and is queryable via the
+        GIN index — handy for forensic lookups without schema changes.
+
+        Server stamps `submitted_at`, `submitted_from_ip`, and `user_agent`
+        on the row; clients don't need to send those.
+      additionalProperties: true
+      example:
+        platform: ios
+        os_version: "17.4"
+        os_build: "21F90"
+        app_version: "1.4.2"
+        app_build: "142"
+        device_model: "iPhone15,2"
+        device_name: "Hung's iPhone"
+        hardware_model: "iPhone15,2"
+        is_jailbroken: false
+        is_passcode_set: true
+        is_disk_encrypted: true
+        is_biometry_enabled: true
+        biometry_type: face_id
+        is_simulator: false
+        is_debug_build: false
+        battery_level: 0.78
+        battery_state: unplugged
+        is_charging: false
+        free_disk_bytes: 12345678901
+        total_disk_bytes: 256000000000
+        physical_memory_bytes: 6442450944
+        uptime_seconds: 86400
+        thermal_state: nominal
+        is_low_power_mode: false
+        locale: vi_VN
+        timezone: Asia/Ho_Chi_Minh
+        collected_at: "2026-04-25T10:00:00Z"
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: app-api
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Check token & get current user
+      operationId: getCurrentUser
+      security:
+        - BearerAuth: []
+      description: |
+        Kiểm tra JWT token còn hợp lệ không và trả về thông tin user hiện tại.
+
+        App gọi endpoint này khi mở lại:
+        - **200** → token OK, user active → vào app bình thường
+        - **401** → token hết hạn hoặc account bị disable → show Sign in with Apple
+      responses:
+        "200":
+          description: Token valid, user active
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    allOf:
+                      - $ref: "#/components/schemas/User"
+                      - type: object
+                        properties:
+                          created_at:
+                            type: string
+                            format: date-time
+        "401":
+          description: Token invalid/expired or account disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                expired_token:
+                  value:
+                    error: "Invalid or expired token"
+                disabled:
+                  value:
+                    error: "Account not found or disabled"
+
+  /api/auth/apple:
+    post:
+      tags: [Auth]
+      summary: Sign in with Apple
+      operationId: signInWithApple
+      description: |
+        Xác thực qua Apple ID. App gửi `identityToken` nhận từ `ASAuthorizationAppleIDProvider`.
+
+        **Lưu ý:** Apple chỉ gửi `email` và `name` ở lần đăng nhập đầu tiên.
+        Các lần sau token có thể không chứa email/name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - identityToken
+              properties:
+                identityToken:
+                  type: string
+                  description: JWT identity token from Apple Sign-In SDK
+                name:
+                  type: string
+                  nullable: true
+                  description: User's name (only available on first sign-in)
+                  example: "Nguyen Van A"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT token (expires in 30 days)
+                    example: "eyJhbGciOiJIUzI1NiIs..."
+                  user:
+                    $ref: "#/components/schemas/User"
+        "400":
+          description: Missing identityToken
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "identityToken is required"
+        "401":
+          description: Invalid or expired Apple token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Invalid Apple identity token"
+        "403":
+          description: Account disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Account is disabled"
+
+  /api/devices:
+    post:
+      tags: [Devices]
+      summary: Register a new device
+      operationId: registerDevice
+      security:
+        - BearerAuth: []
+      description: |
+        Đăng ký device mới với Secure Enclave public key.
+        Nếu device đã tồn tại (cùng `publicKey` + user), trả về device hiện tại.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - os
+                - publicKey
+              properties:
+                name:
+                  type: string
+                  description: Device name
+                  example: "iPhone 15 Pro"
+                os:
+                  type: string
+                  enum: [macos, ios, windows, android]
+                  example: ios
+                osVersion:
+                  type: string
+                  example: "17.4"
+                publicKey:
+                  type: string
+                  format: byte
+                  description: Base64-encoded Secure Enclave P-256 public key (65 bytes, uncompressed 04||X||Y)
+      responses:
+        "201":
+          description: Device registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device:
+                    $ref: "#/components/schemas/Device"
+        "200":
+          description: Device already exists, returned existing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device:
+                    $ref: "#/components/schemas/Device"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                missing_fields:
+                  value:
+                    error: "os and publicKey are required"
+                invalid_os:
+                  value:
+                    error: "os must be one of: macos, ios, windows, android"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      tags: [Devices]
+      summary: List my devices
+      operationId: listDevices
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of user's devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Device"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/devices/{deviceId}:
+    put:
+      tags: [Devices]
+      summary: Update device name
+      operationId: updateDevice
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "MacBook Pro M3"
+      responses:
+        "200":
+          description: Device updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device:
+                    $ref: "#/components/schemas/Device"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Device not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Device not found"
+
+  /api/devices/{deviceId}/posture:
+    post:
+      tags: [Posture]
+      summary: Submit a device posture snapshot
+      description: |
+        Client submits a posture snapshot for a device it owns. Returns 403
+        if the user's enterprise has posture submission disabled (clients
+        should poll `/api/config` first to avoid blind posting). Server
+        stamps `submitted_at` server-side; rows append to history, no
+        update-in-place.
+
+        The cadence is enterprise-configurable via `posture_submission_interval_seconds`
+        (default 300, minimum 60). On iOS the submission only runs while the
+        VPN tunnel is connected (driven from the network extension); on
+        macOS/Windows it runs from the host app whether or not the tunnel is up.
+      operationId: submitDevicePosture
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DevicePostureSubmit"
+      responses:
+        "201":
+          description: Posture stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Posture submission disabled by enterprise setting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Posture submission disabled"
+        "404":
+          description: Device not found (or not owned by the requesting user)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Device not found"
+
+  /api/config:
+    get:
+      tags: [Config]
+      summary: Fetch client-facing config + feature flags
+      description: |
+        Returns the per-enterprise client config the app needs before doing
+        optional periodic work. Right now that's just the posture-submission
+        toggle and interval, but more flags can be added without a versioning
+        bump — clients should ignore unknown keys.
+
+        Falls back to safe defaults (posture disabled, interval 300s) when the
+        user has no enterprise context or the keys are unset.
+      operationId: getClientConfig
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Effective config for this user's enterprise
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientConfig"
+              example:
+                posture:
+                  enabled: true
+                  interval_seconds: 300
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/attest/challenge:
+    get:
+      tags: [App Attest]
+      summary: Get attestation/assertion challenge
+      operationId: getAttestChallenge
+      security:
+        - BearerAuth: []
+      description: |
+        Tạo challenge ngẫu nhiên cho App Attest (TTL 5 phút, dùng 1 lần).
+
+        Dùng cho 2 flow:
+        - **Attestation**: truyền vào `DCAppAttestService.attestKey(keyId, SHA256(challenge))`
+        - **Assertion**: truyền vào `generateAssertion(keyId, SHA256(payload))` và gửi kèm body `/api/connect`
+      responses:
+        "200":
+          description: Challenge created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challenge:
+                    type: string
+                    description: Base64-encoded 32-byte random challenge (expires in 5 minutes)
+                    example: "dGhpcyBpcyBhIHJhbmRvbSBjaGFsbGVuZ2U..."
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/attest/verify:
+    post:
+      tags: [App Attest]
+      summary: Verify device attestation
+      operationId: verifyAttestation
+      security:
+        - BearerAuth: []
+      description: |
+        Verify attestation object từ `DCAppAttestService.attestKey()`.
+        Gọi **1 lần duy nhất** cho mỗi device sau khi đăng ký.
+
+        **iOS/macOS client flow:**
+        ```swift
+        let keyId = try await DCAppAttestService.shared.generateKey()
+        let challenge = // GET /api/attest/challenge
+        let clientDataHash = SHA256.hash(data: challenge.data(using: .utf8)!)
+        let attestation = try await DCAppAttestService.shared.attestKey(keyId, clientDataHash: Data(clientDataHash))
+        // POST /api/attest/verify { keyId, attestation (base64), challenge, deviceId }
+        ```
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - keyId
+                - attestation
+                - challenge
+                - deviceId
+              properties:
+                keyId:
+                  type: string
+                  description: Key ID from `DCAppAttestService.generateKey()`
+                attestation:
+                  type: string
+                  format: byte
+                  description: Base64-encoded CBOR attestation object from `attestKey()`
+                challenge:
+                  type: string
+                  description: Challenge from `GET /api/attest/challenge` (must not be expired/used)
+                deviceId:
+                  type: string
+                  format: uuid
+                  description: Device ID from `/api/devices`
+      responses:
+        "200":
+          description: Attestation verified, device is trusted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified:
+                    type: boolean
+                    example: true
+                  keyId:
+                    type: string
+        "400":
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "keyId, attestation, challenge, and deviceId are required"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Invalid challenge or attestation verification failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                challenge:
+                  value:
+                    error: "Invalid or expired challenge"
+                attest:
+                  value:
+                    error: "Attestation verification failed"
+        "404":
+          description: Device not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Device not found"
+
+  /api/servers:
+    get:
+      tags: [Servers]
+      summary: List available VPN servers
+      operationId: listServers
+      security:
+        - BearerAuth: []
+      description: |
+        Trả về danh sách server VPN chia 2 loại:
+        - **public**: Tất cả user đều thấy
+        - **private**: Chỉ user được assign trong dashboard mới thấy
+      responses:
+        "200":
+          description: Server list grouped by accessMode
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  public:
+                    type: array
+                    description: Public servers — ai cũng thấy
+                    items:
+                      $ref: "#/components/schemas/ServerInfo"
+                  private:
+                    type: array
+                    description: Private servers — chỉ user được assign mới thấy
+                    items:
+                      $ref: "#/components/schemas/ServerInfo"
+              example:
+                public:
+                  - serverId: 1
+                    serverName: "SG-01"
+                    interfaceName: "wg0"
+                    subnetId: 1
+                    subnetCidr: "10.0.0.0/24"
+                    subnetName: "Default"
+                    accessMode: "public"
+                private:
+                  - serverId: 3
+                    serverName: "US-Private"
+                    interfaceName: "wg0"
+                    subnetId: 5
+                    subnetCidr: "10.3.0.0/24"
+                    subnetName: "VIP"
+                    accessMode: "private"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/connect:
+    post:
+      tags: [Connect]
+      summary: Create WireGuard peer (connect VPN)
+      operationId: createConnection
+      security:
+        - BearerAuth: []
+      description: |
+        Tạo WireGuard peer cho device. Mỗi device chỉ có 1 peer — peer cũ tự động bị xoá.
+
+        **Yêu cầu App Attest assertion cho iOS** — device iOS phải đã attest qua `/api/attest/verify`.
+        macOS devices không cần App Attest headers (tự động skip).
+
+        **Flow:**
+        1. `GET /api/attest/challenge` → nhận challenge mới
+        2. App tạo WireGuard keypair (Curve25519)
+        3. App dùng Secure Enclave private key ký `wgPublicKey` → `signature`
+        4. App gọi `generateAssertion(keyId, SHA256(JSON.stringify(body)))` → assertion
+        5. Gửi request với assertion headers + challenge trong body
+        6. Server verify App Attest assertion → verify SE signature → tạo peer
+
+        **Server selection:**
+        - Nếu gửi `serverId` → dùng server đó
+        - Nếu không → auto-select server có ít peer nhất
+
+        **iOS/macOS client:**
+        ```swift
+        let challenge = // GET /api/attest/challenge
+        let body: [String: Any] = [
+          "deviceId": deviceId,
+          "wgPublicKey": wgPubKeyBase64,
+          "signature": signatureBase64,
+          "challenge": challenge
+        ]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let clientDataHash = SHA256.hash(data: bodyData)
+        let assertion = try await DCAppAttestService.shared.generateAssertion(keyId, clientDataHash: Data(clientDataHash))
+        // POST /api/connect with headers + body
+        ```
+      parameters:
+        - name: X-App-Attest-KeyId
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Key ID from App Attest attestation (required for iOS, ignored for macOS)
+        - name: X-App-Attest-Assertion
+          in: header
+          required: false
+          schema:
+            type: string
+            format: byte
+          description: Base64-encoded assertion from `generateAssertion()` (required for iOS, ignored for macOS)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - deviceId
+                - wgPublicKey
+                - signature
+              properties:
+                deviceId:
+                  type: string
+                  format: uuid
+                  description: Device ID from `/api/devices`
+                wgPublicKey:
+                  type: string
+                  format: byte
+                  description: Base64-encoded WireGuard Curve25519 public key
+                signature:
+                  type: string
+                  format: byte
+                  description: Base64-encoded ECDSA P-256 signature of wgPublicKey UTF-8 bytes (signed by Secure Enclave)
+                presharedKey:
+                  type: string
+                  format: byte
+                  nullable: true
+                  description: Base64-encoded WireGuard preshared key (optional)
+                serverId:
+                  type: integer
+                  nullable: true
+                  description: Target server ID (optional, auto-select if omitted)
+                challenge:
+                  type: string
+                  description: Challenge from `GET /api/attest/challenge` (required for iOS, optional for macOS)
+      responses:
+        "201":
+          description: Peer created, return connection config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionConfig"
+        "400":
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "deviceId, wgPublicKey, and signature are required"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: App Attest failed, device disabled, or invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                attest_missing:
+                  value:
+                    error: "App Attest required: X-App-Attest-KeyId, X-App-Attest-Assertion headers and challenge in body"
+                attest_failed:
+                  value:
+                    error: "App Attest assertion failed"
+                not_attested:
+                  value:
+                    error: "Device not attested. Call /api/attest/verify first."
+                disabled:
+                  value:
+                    error: "Device is not enabled"
+                bad_signature:
+                  value:
+                    error: "Invalid signature"
+        "404":
+          description: Device or server not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                device:
+                  value:
+                    error: "Device not found"
+                server:
+                  value:
+                    error: "Server not found"
+        "409":
+          description: No subnet or no available IPs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                no_subnet:
+                  value:
+                    error: "No subnet configured on this server"
+                no_ip:
+                  value:
+                    error: "No available IPs in subnet"
+        "503":
+          description: No servers available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "No servers available"
+
+  /api/connect/status:
+    get:
+      tags: [Connect]
+      summary: Get active VPN connections
+      operationId: getConnectionStatus
+      security:
+        - BearerAuth: []
+      description: |
+        Trả về danh sách kết nối VPN hiện tại của user, kèm trạng thái live.
+
+        `connected: true` nếu WireGuard handshake gần nhất < 180 giây.
+      responses:
+        "200":
+          description: Connection list with live status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connections:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Connection"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"

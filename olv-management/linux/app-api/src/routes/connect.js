@@ -485,6 +485,27 @@ router.post('/', async (req, res) => {
       console.error('[connect] load application_servers failed:', asErr.message);
     }
 
+    // disallowedIPs / disallowedDomains: server-declared CIDRs and hostnames
+    // that should NEVER be routed through the tunnel. Client subtracts these
+    // (plus its own management host's resolved IP) from AllowedIPs before
+    // writing the WG config. This is how we keep the daemon's refresh path
+    // off-tunnel without needing client-side fwmark / pin-route hacks —
+    // pure WG semantics.
+    let disallowedIPs = [];
+    let disallowedDomains = [];
+    if (server.enterprise_id) {
+      const { rows } = await pool.query(
+        `SELECT key, value FROM enterprise_settings
+         WHERE enterprise_id = $1 AND key IN ($2, $3)`,
+        [server.enterprise_id, 'disallowed_ips', 'disallowed_domains']
+      );
+      for (const r of rows) {
+        const list = (r.value || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+        if (r.key === 'disallowed_ips') disallowedIPs = list;
+        else disallowedDomains = list;
+      }
+    }
+
     res.status(201).json({
       peerId: peerMeta[0].id,
       assignedIp: allowedIPs,
@@ -492,6 +513,8 @@ router.post('/', async (req, res) => {
       serverPublicKey,
       serverEndpoint: endpoint,
       allowedIPs: deviceAllowedIps ? deviceAllowedIps.join(', ') : '0.0.0.0/0, ::/0',
+      disallowedIPs,
+      disallowedDomains,
       dns: dns || '1.1.1.1',
       persistentKeepalive: 25,
       serverName: server.name,
