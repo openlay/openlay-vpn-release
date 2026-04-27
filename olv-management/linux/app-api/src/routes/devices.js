@@ -130,6 +130,8 @@ router.post('/:deviceId/posture', async (req, res) => {
          selinux_status, apparmor_enabled, firewall_state, process_count,
          is_bitlocker_on, defender_state, uac_enabled, domain_joined,
          is_secure_boot_on, is_tpm_present,
+         antivirus_name, antivirus_enabled, antivirus_up_to_date,
+         is_xprotect_on, xprotect_version,
          submitted_from_ip, user_agent
        ) VALUES (
          $1, $2, $3,
@@ -148,7 +150,9 @@ router.post('/:deviceId/posture', async (req, res) => {
          $41, $42, $43, $44,
          $45, $46, $47, $48,
          $49, $50,
-         $51, $52
+         $51, $52, $53,
+         $54, $55,
+         $56, $57
        )`,
       [
         deviceId, enterpriseId, posture,
@@ -167,6 +171,8 @@ router.post('/:deviceId/posture', async (req, res) => {
         cols.selinux_status, cols.apparmor_enabled, cols.firewall_state, cols.process_count,
         cols.is_bitlocker_on, cols.defender_state, cols.uac_enabled, cols.domain_joined,
         cols.is_secure_boot_on, cols.is_tpm_present,
+        cols.antivirus_name, cols.antivirus_enabled, cols.antivirus_up_to_date,
+        cols.is_xprotect_on, cols.xprotect_version,
         ip, ua,
       ]
     );
@@ -239,6 +245,11 @@ function extractPostureColumns(p) {
     domain_joined: bool(p.domain_joined),
     is_secure_boot_on: bool(p.is_secure_boot_on),
     is_tpm_present: bool(p.is_tpm_present),
+    antivirus_name: str(p.antivirus_name),
+    antivirus_enabled: bool(p.antivirus_enabled),
+    antivirus_up_to_date: bool(p.antivirus_up_to_date),
+    is_xprotect_on: bool(p.is_xprotect_on),
+    xprotect_version: str(p.xprotect_version),
   };
 }
 

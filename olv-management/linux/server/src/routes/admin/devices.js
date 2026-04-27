@@ -21,7 +21,8 @@ router.get('/', async (req, res) => {
     const aliasEntId = req.enterpriseId;
     let query = `
       SELECT d.*, u.name as user_name, u.email as user_email,
-        da.key_id as attest_key_id, da.sign_count as attest_sign_count, da.created_at as attest_date
+        da.key_id as attest_key_id, da.sign_count as attest_sign_count, da.created_at as attest_date,
+        (SELECT COUNT(*) FROM device_postures dp WHERE dp.device_id = d.id) AS posture_count
         ${aliasEntId ? `, uer.alias as user_alias` : `, (SELECT uer2.alias FROM user_enterprise_roles uer2 WHERE uer2.user_id = u.id AND uer2.alias != '' ORDER BY uer2.created_at LIMIT 1) as user_alias`}
       FROM devices d
       LEFT JOIN users u ON d.user_id = u.id
@@ -391,9 +392,14 @@ router.get('/:id/postures/latest', async (req, res) => {
   }
 });
 
-// DELETE /api/admin/devices/:id
+// DELETE /api/admin/devices/:id — root only.
+// Disable (PUT status='disabled') is the reversible op for enterprise admins;
+// delete is destructive and reserved for root.
 router.delete('/:id', async (req, res) => {
   try {
+    if (req.enterpriseRole !== 'root') {
+      return res.status(403).json({ error: 'Only root can delete devices. Use disable instead.' });
+    }
     if (!(await verifyDeviceAccess(req.params.id, req))) {
       return res.status(404).json({ error: 'Device not found' });
     }

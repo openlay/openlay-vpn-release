@@ -27,40 +27,78 @@ router.get('/', async (req, res) => {
   try {
     const { client } = await getClientAndServer(req.params.serverId, req);
     const agentData = await client.listPeers(req.params.iface);
+    // Live runtime info per peer (handshake, transfer). Best-effort —
+    // interface down or older agent → empty map, peers render as offline.
+    let runtimeMap = new Map();
+    try {
+      const handshakes = await client.getHandshakes(req.params.iface);
+      for (const r of (handshakes.peers || [])) {
+        runtimeMap.set(r.public_key || r.publicKey, r);
+      }
+    } catch (_) { /* ignore — fall back to no runtime data */ }
 
-    // Enrich with local metadata + user enterprise alias
+    // Enrich with local metadata + user enterprise alias + device os (client type)
     const entId = req.enterpriseId;
     const { rows: metaRows } = await pool.query(
       `SELECT pm.*, s.cidr as subnet_cidr, s.name as subnet_name,
-              u.name as user_name, u.email as user_email
+              u.name as user_name, u.email as user_email,
+              d.id as device_id, d.name as device_name, d.os as device_os
               ${entId ? `, uer.alias as user_alias` : ''}
        FROM peers_meta pm
        LEFT JOIN subnets s ON pm.subnet_id = s.id
        LEFT JOIN users u ON pm.user_id = u.id
+       LEFT JOIN devices d ON pm.device_id = d.id
        ${entId ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = pm.user_id AND uer.enterprise_id = '${entId.replace(/'/g, "''")}'` : ''}
        WHERE pm.server_id = $1 AND pm.interface_name = $2`,
       [req.params.serverId, req.params.iface]
     );
 
     const metaMap = new Map(metaRows.map(m => [m.public_key, m]));
-    const agentKeys = new Set((agentData.peers || []).map(p => p.publicKey));
+    const agentKeys = new Set((agentData.peers || []).map(p => p.publicKey || p.public_key));
+
+    // Fallback: when peers_meta has no device_id (e.g. older imports),
+    // try matching the peer's public_key against devices.public_key. Some
+    // OS clients register their key directly with the device row.
+    const unmatchedKeys = [...agentKeys].filter(k => {
+      const m = metaMap.get(k);
+      return !m?.device_id;
+    });
+    let deviceByKey = new Map();
+    if (unmatchedKeys.length > 0) {
+      const { rows: devRows } = await pool.query(
+        `SELECT id, name, os, public_key FROM devices WHERE public_key = ANY($1::text[])`,
+        [unmatchedKeys]
+      );
+      deviceByKey = new Map(devRows.map(d => [d.public_key, d]));
+    }
 
     const enrichedPeers = (agentData.peers || []).map(peer => {
-      const meta = metaMap.get(peer.publicKey);
+      const pubkey = peer.publicKey || peer.public_key;
+      const meta = metaMap.get(pubkey);
+      const rt = runtimeMap.get(pubkey);
+      const fallbackDev = deviceByKey.get(pubkey);
+      const deviceOs = meta?.device_os || fallbackDev?.os || null;
       return {
         ...peer,
         managed: !!meta,
         orphan: false,
-        subnetCidr: meta?.subnet_cidr || null,
-        subnetName: meta?.subnet_name || null,
+        subnet_cidr: meta?.subnet_cidr || null,
+        subnet_name: meta?.subnet_name || null,
         notes: meta?.notes || '',
-        metaAlias: meta?.alias || '',
-        userName: meta?.user_name || null,
-        userEmail: meta?.user_email || null,
-        userAlias: meta?.user_alias || null,
-        expiresAt: meta?.expires_at || null,
-        isExpired: meta?.is_expired || false,
-        allowedSourceIp: meta?.allowed_source_ip || null,
+        meta_alias: meta?.alias || '',
+        user_id: meta?.user_id || null,
+        user_name: meta?.user_name || null,
+        user_email: meta?.user_email || null,
+        user_alias: meta?.user_alias || null,
+        device_id: meta?.device_id || fallbackDev?.id || null,
+        device_name: meta?.device_name || fallbackDev?.name || null,
+        client_type: clientTypeFor(deviceOs, !!meta || !!fallbackDev),
+        expires_at: meta?.expires_at || null,
+        is_expired: meta?.is_expired || false,
+        allowed_source_ip: meta?.allowed_source_ip || null,
+        latest_handshake: rt?.latest_handshake ?? null,
+        transfer_rx: rt?.transfer_rx ?? 0,
+        transfer_tx: rt?.transfer_tx ?? 0,
       };
     });
 
@@ -74,21 +112,25 @@ router.get('/', async (req, res) => {
         allowedIPs: '',
         endpoint: '',
         persistentKeepalive: 0,
-        latestHandshake: null,
-        transferRx: 0,
-        transferTx: 0,
+        latest_handshake: null,
+        transfer_rx: 0,
+        transfer_tx: 0,
         managed: true,
         orphan: true,
-        subnetCidr: meta.subnet_cidr || null,
-        subnetName: meta.subnet_name || null,
+        subnet_cidr: meta.subnet_cidr || null,
+        subnet_name: meta.subnet_name || null,
         notes: meta.notes || '',
-        metaAlias: meta.alias || '',
-        userName: meta.user_name || null,
-        userEmail: meta.user_email || null,
-        userAlias: meta.user_alias || null,
-        expiresAt: meta.expires_at || null,
-        isExpired: meta.is_expired || false,
-        allowedSourceIp: meta.allowed_source_ip || null,
+        meta_alias: meta.alias || '',
+        user_id: meta.user_id || null,
+        user_name: meta.user_name || null,
+        user_email: meta.user_email || null,
+        user_alias: meta.user_alias || null,
+        device_id: meta.device_id || null,
+        device_name: meta.device_name || null,
+        client_type: clientTypeFor(meta.device_os, true),
+        expires_at: meta.expires_at || null,
+        is_expired: meta.is_expired || false,
+        allowed_source_ip: meta.allowed_source_ip || null,
       });
     }
 
@@ -97,6 +139,20 @@ router.get('/', async (req, res) => {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
+
+// Map a device os to one of our supported client labels. Returns 'manual'
+// when there's no linked device — i.e. the peer was imported via raw key.
+function clientTypeFor(os, isManaged) {
+  if (!os) return isManaged ? 'manual' : 'manual';
+  switch (String(os).toLowerCase()) {
+    case 'macos': return 'macos';
+    case 'ios': return 'ios';
+    case 'windows': return 'windows';
+    case 'linux': return 'linux';
+    case 'android': return 'android';
+    default: return 'manual';
+  }
+}
 
 // POST /api/servers/:serverId/interfaces/:iface/peers
 // Supports two modes: "auto" (generate keys) and "import" (provide public key)

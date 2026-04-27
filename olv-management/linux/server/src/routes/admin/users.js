@@ -54,7 +54,8 @@ router.get('/', async (req, res) => {
       SELECT u.*,
         uer.alias as enterprise_alias,
         (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS device_count,
-        (SELECT COUNT(*) FROM peers_meta pm WHERE pm.user_id = u.id) AS peer_count
+        (SELECT COUNT(*) FROM peers_meta pm WHERE pm.user_id = u.id) AS peer_count,
+        (SELECT MAX(d.last_connect_at) FROM devices d WHERE d.user_id = u.id) AS last_connect_at
       FROM users u ${aliasJoin} ${where}
       ORDER BY u.created_at DESC`, params);
     res.json({ users: rows });
@@ -75,7 +76,12 @@ router.get('/:id', async (req, res) => {
       if (check.rows.length === 0) return res.status(404).json({ error: 'User not found in this enterprise' });
     }
 
-    const { rows: users } = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    const { rows: users } = await pool.query(
+      `SELECT u.*,
+              (SELECT MAX(d.last_connect_at) FROM devices d WHERE d.user_id = u.id) AS last_connect_at
+         FROM users u WHERE u.id = $1`,
+      [req.params.id]
+    );
     if (users.length === 0) return res.status(404).json({ error: 'User not found' });
 
     const { rows: devices } = await pool.query(
