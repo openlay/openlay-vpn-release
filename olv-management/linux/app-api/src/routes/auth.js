@@ -1,10 +1,76 @@
 const { Router } = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { verifyAttestation } = require('node-app-attest');
 const { pool } = require('../db/pool');
 const config = require('../config');
 const { verifyAppleIdentityToken } = require('../services/appleAuth');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
+
+/**
+ * Verify an App Attest attestation token bound to a server-issued challenge.
+ * Returns the verified result on success, or null + sets res.status on failure.
+ *
+ * Used by /api/auth/apple. The same shape used by /api/enroll lives in its
+ * own route handler — kept duplicated to avoid coupling the two flows.
+ */
+async function verifyClientAppAttest(req, res, { os }) {
+  if (config.skipAppAttest) return { skipped: true };
+  if (!config.appAttestProduction) return { skipped: true };
+  if (!['ios', 'macos'].includes(os)) return { skipped: true };
+
+  const attestKeyId = req.body?.attest_key_id ?? req.body?.attestKeyId;
+  const attestation = req.body?.attestation;
+  const attestChallenge = req.body?.attest_challenge ?? req.body?.attestChallenge;
+  if (!attestKeyId || !attestation || !attestChallenge) {
+    res.status(403).json({
+      error: 'attest_key_id, attestation, and attest_challenge are required for iOS/macOS login',
+    });
+    return null;
+  }
+
+  // Validate challenge: unused + not expired. Issued via /api/enroll/challenge.
+  // We reuse the same challenge minting endpoint for both flows since both are
+  // pre-auth (no JWT yet) and we don't want to mint a separate one per surface.
+  const { rows: challRows } = await pool.query(
+    `SELECT id FROM attest_challenges
+       WHERE challenge = $1 AND user_id IS NULL AND used = FALSE AND expires_at > NOW()
+       LIMIT 1`,
+    [attestChallenge]
+  );
+  if (challRows.length === 0) {
+    res.status(403).json({ error: 'Invalid or expired attest_challenge' });
+    return null;
+  }
+
+  const allowDev = !config.appAttestProduction;
+  let result = null;
+  let lastError = null;
+  for (const bundleId of config.appleClientIds) {
+    try {
+      result = await verifyAttestation({
+        attestation: Buffer.from(attestation, 'base64'),
+        challenge: attestChallenge,
+        keyId: attestKeyId,
+        bundleIdentifier: bundleId,
+        teamIdentifier: config.appleTeamId,
+        allowDevelopmentEnvironment: allowDev,
+      });
+      result._bundleId = bundleId;
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!result) {
+    console.log('[auth/apple] App Attest failed:', lastError?.message);
+    res.status(403).json({ error: 'App Attest verification failed' });
+    return null;
+  }
+
+  await pool.query('UPDATE attest_challenges SET used = TRUE WHERE id = $1', [challRows[0].id]);
+  return { skipped: false, ...result, keyId: attestKeyId };
+}
 
 // Password verification (scrypt, matches management server)
 async function verifyPassword(password, hash) {
@@ -24,9 +90,17 @@ router.post('/apple', async (req, res) => {
   try {
     const identityToken = req.body.identityToken || req.body.identity_token;
     const name = req.body.name;
+    const os = req.body.os; // optional: 'ios' | 'macos' — used to gate App Attest
     if (!identityToken) {
       return res.status(400).json({ error: 'identityToken is required' });
     }
+
+    // Verify App Attest before doing any DB writes — when APP_ATTEST_PRODUCTION
+    // is on, we refuse Apple sign-ins from non-genuine clients (curl, debug
+    // builds, etc.). Skipped on staging (SKIP_APP_ATTEST), in non-prod
+    // attestation mode, or when the OS isn't iOS/macOS.
+    const attestCheck = await verifyClientAppAttest(req, res, { os });
+    if (attestCheck === null) return; // verifier already wrote the response
 
     // Verify with Apple JWKS
     const applePayload = await verifyAppleIdentityToken(identityToken, config.appleClientIds);

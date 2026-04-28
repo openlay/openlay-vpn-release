@@ -103,13 +103,17 @@ router.post('/verify', async (req, res) => {
       return res.status(403).json({ error: 'Attestation verification failed' });
     }
 
-    // Store attestation — delete old one for this device if exists
+    // Store attestation — delete old one for this device if exists.
+    // `environment` ('production' | 'development') comes from the AAGUID in
+    // authData; we record it so /api/connect can reject dev-build devices
+    // when APP_ATTEST_PRODUCTION=true is flipped after attest.
     await pool.query('DELETE FROM device_attestations WHERE device_id = $1', [deviceId]);
 
     await pool.query(
-      `INSERT INTO device_attestations (device_id, key_id, public_key, sign_count, receipt)
-       VALUES ($1, $2, $3, 0, $4)`,
-      [deviceId, keyId, result.publicKey, result.receipt || null]
+      `INSERT INTO device_attestations
+         (device_id, key_id, public_key, sign_count, receipt, environment)
+       VALUES ($1, $2, $3, 0, $4, $5)`,
+      [deviceId, keyId, result.publicKey, result.receipt || null, result.environment || null]
     );
 
     res.json({ verified: true, keyId });

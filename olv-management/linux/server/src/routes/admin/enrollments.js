@@ -161,6 +161,31 @@ router.post('/:id/approve', async (req, res) => {
       [deviceId, userId]
     );
 
+    // Carry the App Attest record forward. /api/enroll captures it on iOS/macOS;
+    // copying here makes /api/connect's appAttest middleware able to verify
+    // assertions against the same keyId without forcing a re-attest after
+    // approval.
+    if (enrollment.attest_key_id && enrollment.attest_public_key) {
+      // Match the pattern in /api/attest/verify: replace any prior row for
+      // this device. The unique key in device_attestations is `key_id`, not
+      // `device_id`, so we DELETE first to avoid keyId collisions if the
+      // device was approved-and-rejected earlier.
+      await client.query('DELETE FROM device_attestations WHERE device_id = $1', [deviceId]);
+      await client.query(
+        `INSERT INTO device_attestations
+           (device_id, key_id, public_key, sign_count, receipt, environment, bundle_id)
+         VALUES ($1, $2, $3, 0, $4, $5, $6)`,
+        [
+          deviceId,
+          enrollment.attest_key_id,
+          enrollment.attest_public_key,
+          enrollment.attest_receipt || null,
+          enrollment.attest_environment || null,
+          enrollment.attest_bundle_id || null,
+        ]
+      );
+    }
+
     await client.query(
       `UPDATE enrollment_requests
          SET status = 'approved', enterprise_id = $1,

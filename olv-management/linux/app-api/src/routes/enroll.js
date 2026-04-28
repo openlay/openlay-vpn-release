@@ -1,10 +1,32 @@
 const { Router } = require('express');
+const crypto = require('crypto');
+const { verifyAttestation } = require('node-app-attest');
 const { pool } = require('../db/pool');
+const config = require('../config');
 
 const CODE_VALUE_KEY = 'enrollment_code_value';
 const CODE_EXPIRES_KEY = 'enrollment_code_expires_at';
 
 const router = Router();
+
+// POST /api/enroll/challenge — Public endpoint to mint a one-time challenge
+// the client must include in its App Attest attestation. We persist it in
+// `attest_challenges` with a NULL user_id (since the device hasn't enrolled
+// yet) and a short TTL. /api/enroll consumes the row and marks it used.
+router.post('/challenge', async (req, res) => {
+  try {
+    const challenge = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    await pool.query(
+      `INSERT INTO attest_challenges (challenge, user_id, expires_at, used)
+       VALUES ($1, NULL, $2, FALSE)`,
+      [challenge, expiresAt]
+    );
+    res.json({ challenge, expires_at: expiresAt.toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // POST /api/enroll
 // Public (unauthenticated). The 10-digit code identifies WHICH enterprise
@@ -31,6 +53,66 @@ router.post('/', async (req, res) => {
     }
     if (!['macos', 'ios', 'windows', 'android', 'linux'].includes(os)) {
       return res.status(400).json({ error: 'os must be macos, ios, windows, android, or linux' });
+    }
+
+    // App Attest: required for iOS/macOS when the prod flag is set. Goal is to
+    // bind `publicKey` (which the client claims is its SE/HW key) to a real
+    // Apple-issued attestation of the same key — preventing a debug build or
+    // a curl script from registering an arbitrary publicKey via the enroll
+    // code. Skipped when SKIP_APP_ATTEST=true (staging).
+    let attestResult = null;
+    const needsAppAttest =
+      !config.skipAppAttest &&
+      config.appAttestProduction &&
+      ['ios', 'macos'].includes(os);
+
+    if (needsAppAttest) {
+      const attestKeyId = req.body?.attest_key_id ?? req.body?.attestKeyId;
+      const attestation = req.body?.attestation;
+      const attestChallenge = req.body?.attest_challenge ?? req.body?.attestChallenge;
+      if (!attestKeyId || !attestation || !attestChallenge) {
+        return res.status(403).json({
+          error: 'attest_key_id, attestation, and attest_challenge are required for iOS/macOS enrollment',
+        });
+      }
+
+      // Validate challenge: must exist, be unused, and not expired.
+      const { rows: challRows } = await pool.query(
+        `SELECT id FROM attest_challenges
+          WHERE challenge = $1 AND user_id IS NULL AND used = FALSE AND expires_at > NOW()
+          LIMIT 1`,
+        [attestChallenge]
+      );
+      if (challRows.length === 0) {
+        return res.status(403).json({ error: 'Invalid or expired attest_challenge' });
+      }
+
+      // Verify the attestation across all valid bundle ids.
+      const allowDev = !config.appAttestProduction;
+      let lastError = null;
+      for (const bundleId of config.appleClientIds) {
+        try {
+          attestResult = await verifyAttestation({
+            attestation: Buffer.from(attestation, 'base64'),
+            challenge: attestChallenge,
+            keyId: attestKeyId,
+            bundleIdentifier: bundleId,
+            teamIdentifier: config.appleTeamId,
+            allowDevelopmentEnvironment: allowDev,
+          });
+          attestResult._bundleId = bundleId;
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      if (!attestResult) {
+        console.log('[enroll] App Attest verification failed:', lastError?.message);
+        return res.status(403).json({ error: 'App Attest verification failed' });
+      }
+
+      // Mark challenge consumed.
+      await pool.query('UPDATE attest_challenges SET used = TRUE WHERE id = $1', [challRows[0].id]);
     }
 
     // Reverse-lookup: find the enterprise whose current code matches.
@@ -73,10 +155,18 @@ router.post('/', async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO enrollment_requests
-         (device_name, hardware_id, os, os_version, public_key, status, enterprise_id)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+         (device_name, hardware_id, os, os_version, public_key, status, enterprise_id,
+          attest_key_id, attest_public_key, attest_environment, attest_bundle_id, attest_receipt)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11)
        RETURNING id`,
-      [deviceName, hardwareId, os, osVersion || '', publicKey, enterpriseId]
+      [
+        deviceName, hardwareId, os, osVersion || '', publicKey, enterpriseId,
+        attestResult ? (req.body?.attest_key_id ?? req.body?.attestKeyId) : null,
+        attestResult ? attestResult.publicKey : null,
+        attestResult ? attestResult.environment : null,
+        attestResult ? attestResult._bundleId : null,
+        attestResult ? attestResult.receipt || null : null,
+      ]
     );
 
     res.status(201).json({

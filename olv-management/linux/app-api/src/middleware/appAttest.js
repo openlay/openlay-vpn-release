@@ -20,21 +20,46 @@ async function appAttest(req, res, next) {
   // every Apple-related request.
   if (config.skipAppAttest) return next();
 
-  // Skip App Attest for password-authenticated users (they use SE signature instead)
+  // Look up device + attestation env so we can decide whether App Attest
+  // applies to this request, and reject development-environment devices
+  // when APP_ATTEST_PRODUCTION=true.
   const { deviceId } = req.body;
+  let deviceRow = null;
   if (deviceId) {
     const { rows } = await pool.query(
-      `SELECT d.os, u.auth_type FROM devices d
-       LEFT JOIN users u ON d.user_id = u.id
-       WHERE d.id = $1 OR d.hardware_id = $1`,
+      `SELECT d.os, u.auth_type, da.environment AS attest_env
+         FROM devices d
+         LEFT JOIN users u ON d.user_id = u.id
+         LEFT JOIN device_attestations da ON da.device_id = d.id
+        WHERE d.id = $1 OR d.hardware_id = $1`,
       [deviceId]
     );
     if (rows.length > 0) {
-      // Skip for non-iOS (macOS doesn't support App Attest)
-      if (rows[0].os !== 'ios') return next();
-      // Skip for password users (no App Attest, verified by SE signature)
-      if (rows[0].auth_type === 'password') return next();
+      deviceRow = rows[0];
+      // App Attest is supported on iOS 14+ AND macOS 11+ (DCAppAttestService
+      // works on macOS Apple Silicon). Skip ONLY for non-Apple OSes
+      // (Linux/Windows/Android) where the framework doesn't exist.
+      if (!['ios', 'macos'].includes(deviceRow.os)) return next();
+      // Password users authenticate via SE signature on /api/connect itself —
+      // App Attest is redundant for them.
+      if (deviceRow.auth_type === 'password') return next();
     }
+  }
+
+  // When APP_ATTEST_PRODUCTION=true, refuse devices whose original
+  // attestation came from the development environment (debug builds with
+  // dev-cert AAGUID = "appattestdevelop"). This catches the case where a
+  // device was attested before the prod flag was flipped — the row stays
+  // valid for verifyAssertion (key match still works), but we want it
+  // rejected at the policy layer.
+  if (
+    config.appAttestProduction &&
+    deviceRow &&
+    deviceRow.attest_env === 'development'
+  ) {
+    return res.status(403).json({
+      error: 'This device was registered with a development build and cannot connect to production.',
+    });
   }
 
   const keyId = req.headers['x-app-attest-keyid'];
