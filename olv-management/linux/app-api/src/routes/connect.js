@@ -357,11 +357,32 @@ router.post('/', async (req, res) => {
       [device.id, server.id, subnetId]
     );
 
+    // Device profile (if assigned) drives the tunnel rules. Profile-level
+    // allowed_ips wins over per-static-IP allowed_ips so the admin can
+    // change tunnel scope across many devices in one place. The static-IP
+    // allowed_ips remains as a per-(device,server) override only when no
+    // profile is assigned (legacy path).
+    let profile = null;
+    if (device.profile_id) {
+      const { rows: profileRows } = await pool.query(
+        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture FROM device_profiles WHERE id = $1',
+        [device.profile_id]
+      );
+      profile = profileRows[0] || null;
+    }
+
     let nextIp;
-    // allowed_ips from DB (TEXT[] array), empty = route all traffic
-    const deviceAllowedIps = staticIpRows.length > 0 && staticIpRows[0].allowed_ips && staticIpRows[0].allowed_ips.length > 0
+    // Resolve effective device-level allowed_ips:
+    //   1. Profile.allowed_ips (if profile assigned and non-empty)
+    //   2. Static-IP allowed_ips (legacy per-(device,server) override)
+    //   3. null → route all traffic (default 0.0.0.0/0, ::/0)
+    const profileAllowed = profile?.allowed_ips && profile.allowed_ips.length > 0
+      ? profile.allowed_ips
+      : null;
+    const staticAllowed = staticIpRows.length > 0 && staticIpRows[0].allowed_ips && staticIpRows[0].allowed_ips.length > 0
       ? staticIpRows[0].allowed_ips
       : null;
+    const deviceAllowedIps = profileAllowed || staticAllowed;
 
     if (staticIpRows.length > 0) {
       nextIp = staticIpRows[0].ip_address;
@@ -485,15 +506,18 @@ router.post('/', async (req, res) => {
       console.error('[connect] load application_servers failed:', asErr.message);
     }
 
-    // disallowedIPs / disallowedDomains: server-declared CIDRs and hostnames
-    // that should NEVER be routed through the tunnel. Client subtracts these
-    // (plus its own management host's resolved IP) from AllowedIPs before
-    // writing the WG config. This is how we keep the daemon's refresh path
-    // off-tunnel without needing client-side fwmark / pin-route hacks —
-    // pure WG semantics.
+    // disallowedIPs / disallowedDomains: CIDRs and hostnames the client must
+    // NEVER route through the tunnel. Source of truth precedence:
+    //   1. Device profile (per-device, multi-device reusable)
+    //   2. Enterprise settings (legacy enterprise-wide singletons)
+    // Client subtracts these from AllowedIPs (plus the management host's
+    // resolved IP) before writing WG config.
     let disallowedIPs = [];
     let disallowedDomains = [];
-    if (server.enterprise_id) {
+    if (profile) {
+      disallowedIPs = profile.exclusion_ips || [];
+      disallowedDomains = profile.exclusion_domains || [];
+    } else if (server.enterprise_id) {
       const { rows } = await pool.query(
         `SELECT key, value FROM enterprise_settings
          WHERE enterprise_id = $1 AND key IN ($2, $3)`,
@@ -521,6 +545,246 @@ router.post('/', async (req, res) => {
       application_servers,
     });
   } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/connect/refresh — Rotate WG peer key for an existing device session.
+// Mounted as a sibling route (jwtAuth only, no appAttest) so the iOS Network
+// Extension can call it on its own — DCAppAttestService is host-app-only.
+//
+// Security model:
+//   1. jwtAuth → user identity (Bearer JWT, 30d TTL).
+//   2. SE signature over wgPublicKey → device hardware (same check as /connect).
+//   3. currentPeerId must be an active peers_meta row for this device → continuity.
+//      Prevents replay: a captured signature cannot be reused once the peer it
+//      replaced has been rotated.
+//
+// No App Attest because (jwtAuth + SE sig + continuity) is equivalent assurance
+// for *replacing* an existing peer that was originally provisioned through the
+// full /api/connect path.
+const refreshRouter = Router();
+refreshRouter.post('/', async (req, res) => {
+  try {
+    const { deviceId, currentPeerId, wgPublicKey, signature, presharedKey } = req.body;
+    if (!deviceId || !currentPeerId || !wgPublicKey || !signature) {
+      return res.status(400).json({ error: 'deviceId, currentPeerId, wgPublicKey, and signature are required' });
+    }
+
+    // Validate device + ownership
+    const { rows: devices } = await pool.query(
+      'SELECT * FROM devices WHERE (id = $1 OR hardware_id = $1) AND user_id = $2',
+      [deviceId, req.user.id]
+    );
+    if (devices.length === 0) return res.status(404).json({ error: 'Device not found' });
+    const device = devices[0];
+    if (device.status !== 'enabled') return res.status(403).json({ error: 'Device is not enabled' });
+
+    // Verify SE signature over the new wgPublicKey
+    const isValid = verifySecureEnclaveSignature(device.public_key, wgPublicKey, signature);
+    if (!isValid) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    // Continuity check: currentPeerId must belong to this device and not be expired
+    const { rows: existing } = await pool.query(
+      `SELECT pm.*, s.name AS server_name, s.url, s.public_ip, s.hostname, s.api_token, s.enterprise_id
+       FROM peers_meta pm
+       JOIN servers s ON pm.server_id = s.id
+       WHERE pm.id = $1 AND pm.device_id = $2 AND pm.is_expired = FALSE`,
+      [currentPeerId, device.id]
+    );
+    if (existing.length === 0) {
+      return res.status(403).json({ error: 'currentPeerId mismatch or peer expired (continuity check failed)' });
+    }
+    const old = existing[0];
+
+    // Resolve subnet
+    const { rows: subnets } = await pool.query('SELECT * FROM subnets WHERE id = $1', [old.subnet_id]);
+    if (subnets.length === 0) return res.status(409).json({ error: 'Subnet not found' });
+    const subnet = subnets[0];
+
+    const client = new AgentClient(old.server_id);
+
+    // Profile + static-IP resolution mirrors /api/connect so refresh respects
+    // the same admin-managed routing rules.
+    const { rows: staticIpRows } = await pool.query(
+      'SELECT ip_address, allowed_ips FROM device_static_ips WHERE device_id = $1 AND server_id = $2 AND subnet_id = $3 LIMIT 1',
+      [device.id, old.server_id, old.subnet_id]
+    );
+
+    let profile = null;
+    if (device.profile_id) {
+      const { rows: profileRows } = await pool.query(
+        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture FROM device_profiles WHERE id = $1',
+        [device.profile_id]
+      );
+      profile = profileRows[0] || null;
+    }
+    const profileAllowed = profile?.allowed_ips && profile.allowed_ips.length > 0
+      ? profile.allowed_ips : null;
+    const staticAllowed = staticIpRows.length > 0 && staticIpRows[0].allowed_ips && staticIpRows[0].allowed_ips.length > 0
+      ? staticIpRows[0].allowed_ips : null;
+    const deviceAllowedIps = profileAllowed || staticAllowed;
+
+    // Free the old peer first so a dynamic-IP refresh can keep the same address.
+    try {
+      await client.removePeer(old.interface_name, old.public_key);
+    } catch { /* agent unreachable, continue */ }
+
+    let nextIp;
+    if (staticIpRows.length > 0) {
+      nextIp = staticIpRows[0].ip_address;
+    } else {
+      const usedIps = await getUsedIps(client, old.interface_name);
+      nextIp = getNextAvailableIp(subnet.cidr, usedIps);
+      if (!nextIp) {
+        return res.status(409).json({ error: 'No available IPs in subnet' });
+      }
+    }
+
+    const allowedIPs = `${nextIp.split('/')[0]}/32`;
+    const alias = `${req.user.email || 'user'}/${device.name || device.os}`;
+
+    // Add new peer on agent
+    try {
+      await client.addPeer(old.interface_name, {
+        publicKey: wgPublicKey,
+        allowedIPs,
+        presharedKey: presharedKey || undefined,
+        persistentKeepalive: 25,
+        alias,
+      });
+    } catch (peerErr) {
+      console.error('[refresh] addPeer FAILED:', peerErr.message);
+      return res.status(502).json({ error: 'Agent failure' });
+    }
+
+    // Atomic DB swap (single transaction so a partial failure doesn't leave a
+    // ghost peer entry that the next refresh would mistake for current).
+    let newPeerId;
+    let dbExpiresAt;
+    const dbClient = await pool.connect();
+    try {
+      await dbClient.query('BEGIN');
+      await dbClient.query('DELETE FROM peers_meta WHERE id = $1', [old.id]);
+      const ttlHours = await resolvePeerTtlHours(old.enterprise_id);
+      const computedExpiresAt = ttlHours > 0 ? new Date(Date.now() + ttlHours * 3600 * 1000).toISOString() : null;
+      const { rows: peerMeta } = await dbClient.query(
+        `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, device_id, user_id, expires_at, is_expired)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+         ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
+         SET subnet_id = $4, alias = $5, device_id = $6, user_id = $7, expires_at = $8, is_expired = FALSE
+         RETURNING id, expires_at`,
+        [old.server_id, old.interface_name, wgPublicKey, old.subnet_id, alias, device.id, req.user.id, computedExpiresAt]
+      );
+      newPeerId = peerMeta[0].id;
+      dbExpiresAt = peerMeta[0].expires_at;
+      await dbClient.query('UPDATE devices SET last_connect_at = NOW() WHERE id = $1', [device.id]);
+      await dbClient.query('COMMIT');
+    } catch (dbErr) {
+      await dbClient.query('ROLLBACK');
+      console.error('[refresh] DB swap failed:', dbErr.message);
+      // Best-effort cleanup: undo the agent-side add since DB didn't accept it
+      try { await client.removePeer(old.interface_name, wgPublicKey); } catch { /* ignore */ }
+      return res.status(500).json({ error: 'Database update failed' });
+    } finally {
+      dbClient.release();
+    }
+
+    // Resync firewall rules so any policy referencing this user picks up the new IP
+    try {
+      await client.resyncUserFirewallRules([req.user.id]);
+    } catch (syncErr) {
+      console.error('[refresh] resync failed:', syncErr.message);
+    }
+
+    // Server connection info
+    let serverPublicKey = '';
+    let listenPort = '';
+    let dns = '';
+    try {
+      const ifaceInfo = await client.getInterface(old.interface_name);
+      listenPort = ifaceInfo.listenPort;
+      dns = ifaceInfo.dns || '';
+      const statusInfo = await client.getStatus(old.interface_name);
+      serverPublicKey = statusInfo.public_key || '';
+    } catch (infoErr) {
+      console.error('[refresh] getInterface/getStatus FAILED:', infoErr.message);
+    }
+
+    let serverHost = old.public_ip || '';
+    if (!serverHost && old.url) {
+      try { serverHost = new URL(old.url).hostname; } catch { /* */ }
+    }
+    if (!serverHost) serverHost = old.hostname || '';
+    if (!serverHost) {
+      return res.status(409).json({ error: 'Server has no public IP or hostname configured' });
+    }
+    const endpoint = `${serverHost}:${listenPort}`;
+
+    // Application servers
+    let application_servers = [];
+    try {
+      const { rows } = await pool.query(
+        `SELECT a.id, a.name, a.description, a.ip::text AS ip,
+                a.port, a.local_port, a.server_id
+         FROM application_servers a
+         WHERE a.server_id = $1 AND a.enabled = TRUE
+         AND (
+           EXISTS (
+             SELECT 1 FROM application_server_users u
+             WHERE u.app_id = a.id AND u.user_id = $2
+           )
+           OR EXISTS (
+             SELECT 1 FROM application_server_groups g
+             JOIN user_group_members m ON m.user_group_id = g.user_group_id
+             WHERE g.app_id = a.id AND m.user_id = $2
+           )
+         )
+         ORDER BY a.local_port`,
+        [old.server_id, req.user.id]
+      );
+      application_servers = rows;
+    } catch (asErr) {
+      console.error('[refresh] load application_servers failed:', asErr.message);
+    }
+
+    // disallowedIPs / disallowedDomains (same precedence as /api/connect)
+    let disallowedIPs = [];
+    let disallowedDomains = [];
+    if (profile) {
+      disallowedIPs = profile.exclusion_ips || [];
+      disallowedDomains = profile.exclusion_domains || [];
+    } else if (old.enterprise_id) {
+      const { rows } = await pool.query(
+        `SELECT key, value FROM enterprise_settings
+         WHERE enterprise_id = $1 AND key IN ($2, $3)`,
+        [old.enterprise_id, 'disallowed_ips', 'disallowed_domains']
+      );
+      for (const r of rows) {
+        const list = (r.value || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+        if (r.key === 'disallowed_ips') disallowedIPs = list;
+        else disallowedDomains = list;
+      }
+    }
+
+    res.status(200).json({
+      peerId: newPeerId,
+      assignedIp: allowedIPs,
+      expiresAt: dbExpiresAt,
+      serverPublicKey,
+      serverEndpoint: endpoint,
+      allowedIPs: deviceAllowedIps ? deviceAllowedIps.join(', ') : '0.0.0.0/0, ::/0',
+      disallowedIPs,
+      disallowedDomains,
+      dns: dns || '1.1.1.1',
+      persistentKeepalive: 25,
+      serverName: old.server_name,
+      application_servers,
+    });
+  } catch (err) {
+    console.error('[refresh] unhandled error:', err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
@@ -575,3 +839,4 @@ router.get('/status', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.refreshRouter = refreshRouter;

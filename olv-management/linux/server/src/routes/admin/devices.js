@@ -22,11 +22,14 @@ router.get('/', async (req, res) => {
     let query = `
       SELECT d.*, u.name as user_name, u.email as user_email,
         da.key_id as attest_key_id, da.sign_count as attest_sign_count, da.created_at as attest_date,
-        (SELECT COUNT(*) FROM device_postures dp WHERE dp.device_id = d.id) AS posture_count
+        (SELECT COUNT(*) FROM device_postures dp WHERE dp.device_id = d.id) AS posture_count,
+        (SELECT COUNT(*) FROM peers_meta pm WHERE pm.device_id = d.id) AS peer_count,
+        dp_prof.name as profile_name
         ${aliasEntId ? `, uer.alias as user_alias` : `, (SELECT uer2.alias FROM user_enterprise_roles uer2 WHERE uer2.user_id = u.id AND uer2.alias != '' ORDER BY uer2.created_at LIMIT 1) as user_alias`}
       FROM devices d
       LEFT JOIN users u ON d.user_id = u.id
       LEFT JOIN device_attestations da ON da.device_id = d.id
+      LEFT JOIN device_profiles dp_prof ON dp_prof.id = d.profile_id
       ${aliasEntId ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = '${aliasEntId.replace(/'/g, "''")}'` : ''}
     `;
     const conditions = [];
@@ -139,6 +142,7 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Device not found' });
     }
     const { name, status } = req.body;
+    const profileIdRaw = req.body.profile_id !== undefined ? req.body.profile_id : req.body.profileId;
     const fields = [];
     const values = [];
     let idx = 1;
@@ -150,6 +154,20 @@ router.put('/:id', async (req, res) => {
       }
       fields.push(`status = $${idx++}`);
       values.push(status);
+    }
+    if (profileIdRaw !== undefined) {
+      // null clears the profile; non-null must reference a profile in this enterprise.
+      if (profileIdRaw !== null) {
+        const check = await pool.query(
+          'SELECT 1 FROM device_profiles WHERE id = $1 AND enterprise_id = $2',
+          [profileIdRaw, req.enterpriseId]
+        );
+        if (check.rows.length === 0) {
+          return res.status(400).json({ error: 'profile_id does not exist in this enterprise' });
+        }
+      }
+      fields.push(`profile_id = $${idx++}`);
+      values.push(profileIdRaw);
     }
 
     if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
@@ -327,6 +345,33 @@ router.delete('/:id/static-ips/:sipId', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Static IP not found' });
     if (existing[0]) await triggerStaticIpResync(existing[0].server_id, req.params.id);
     res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/devices/:id/peers
+// All peer rows tied to this device, enriched with server / interface /
+// subnet info so the admin sees a single screen of "where this device
+// lives on the VPN" without bouncing between tabs.
+router.get('/:id/peers', async (req, res) => {
+  try {
+    if (!(await verifyDeviceAccess(req.params.id, req))) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+    const { rows } = await pool.query(
+      `SELECT pm.id, pm.public_key, pm.alias, pm.interface_name, pm.expires_at,
+              pm.is_expired, pm.allowed_source_ip, pm.created_at,
+              s.id AS server_id, s.name AS server_name,
+              sub.cidr AS subnet_cidr, sub.name AS subnet_name
+         FROM peers_meta pm
+         LEFT JOIN servers s ON s.id = pm.server_id
+         LEFT JOIN subnets sub ON sub.id = pm.subnet_id
+        WHERE pm.device_id = $1
+        ORDER BY pm.created_at DESC`,
+      [req.params.id]
+    );
+    res.json({ peers: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

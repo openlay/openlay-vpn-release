@@ -57,6 +57,11 @@ app.use('/api/devices', jwtAuth, devicesRouter);
 app.use('/api/servers', jwtAuth, serversRouter);
 app.use('/api/attest', jwtAuth, attestRouter);
 app.use('/api/config', jwtAuth, configRouter);
+// /api/connect/refresh is mounted FIRST so Express routes it before falling
+// through to the broader /api/connect handler. Refresh skips appAttest because
+// DCAppAttestService can't run in a Network Extension; the (jwtAuth + SE
+// signature + currentPeerId continuity) trio is the equivalent assurance.
+app.use('/api/connect/refresh', jwtAuth, connectRouter.refreshRouter);
 app.use('/api/connect', jwtAuth, appAttest, connectRouter);
 
 // Error handler

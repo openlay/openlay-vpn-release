@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
+const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
 
 const router = Router();
 
@@ -252,6 +253,55 @@ function extractPostureColumns(p) {
     xprotect_version: str(p.xprotect_version),
   };
 }
+
+// POST /api/devices/:deviceId/rekey — Rotate the device's Secure-Enclave-bound
+// public key. Used by Apple clients during the one-time migration that moves
+// the SE key from per-bundle storage into the shared keychain access group
+// (so the Network Extension can reach it for refresh signing).
+//
+// The new pubkey must be signed by the OLD pubkey already on file. That proves
+// the caller controls the previous key — equivalent assurance to App Attest
+// for this single rotation, without needing host-app Apple-only entitlements.
+//
+// The UPDATE is guarded by `WHERE public_key = oldKey` so two concurrent
+// migrations (e.g. iPhone and Mac on the same device record) can't race —
+// only one will see rowCount=1, the other gets 409.
+router.post('/:deviceId/rekey', async (req, res) => {
+  try {
+    const { newPublicKey, signature } = req.body;
+    if (!newPublicKey || !signature) {
+      return res.status(400).json({ error: 'newPublicKey and signature are required' });
+    }
+
+    const { rows: devices } = await pool.query(
+      'SELECT * FROM devices WHERE (id = $1 OR hardware_id = $1) AND user_id = $2',
+      [req.params.deviceId, req.user.id]
+    );
+    if (devices.length === 0) return res.status(404).json({ error: 'Device not found' });
+    const device = devices[0];
+    if (device.status !== 'enabled') return res.status(403).json({ error: 'Device is not enabled' });
+
+    // Verify the OLD key signed the NEW pubkey
+    const isValid = verifySecureEnclaveSignature(device.public_key, newPublicKey, signature);
+    if (!isValid) {
+      return res.status(403).json({ error: 'Invalid signature: old key did not sign new pubkey' });
+    }
+
+    // Atomic guard against concurrent rekey races
+    const { rowCount } = await pool.query(
+      `UPDATE devices SET public_key = $1, updated_at = NOW()
+       WHERE id = $2 AND public_key = $3`,
+      [newPublicKey, device.id, device.public_key]
+    );
+    if (rowCount === 0) {
+      return res.status(409).json({ error: 'Device public_key was already rotated by another client' });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
 
 // PUT /api/devices/:deviceId — Update device name
 router.put('/:deviceId', async (req, res) => {
