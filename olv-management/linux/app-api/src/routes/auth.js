@@ -7,6 +7,10 @@ const config = require('../config');
 const { verifyAppleIdentityToken } = require('../services/appleAuth');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
 
+// Same wording as /api/connect + /api/enroll so the user sees one
+// consistent message no matter which hop refuses the request.
+const APP_ATTEST_USER_ERROR = 'Only Apple App Store applications are allowed to connect.';
+
 /**
  * Verify an App Attest attestation token bound to a server-issued challenge.
  * Returns the verified result on success, or null + sets res.status on failure.
@@ -23,9 +27,8 @@ async function verifyClientAppAttest(req, res, { os }) {
   const attestation = req.body?.attestation;
   const attestChallenge = req.body?.attest_challenge ?? req.body?.attestChallenge;
   if (!attestKeyId || !attestation || !attestChallenge) {
-    res.status(403).json({
-      error: 'attest_key_id, attestation, and attest_challenge are required for iOS/macOS login',
-    });
+    console.log('[auth/apple] App Attest headers missing for', os);
+    res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     return null;
   }
 
@@ -39,7 +42,8 @@ async function verifyClientAppAttest(req, res, { os }) {
     [attestChallenge]
   );
   if (challRows.length === 0) {
-    res.status(403).json({ error: 'Invalid or expired attest_challenge' });
+    console.log('[auth/apple] invalid/expired attest_challenge');
+    res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     return null;
   }
 
@@ -64,7 +68,7 @@ async function verifyClientAppAttest(req, res, { os }) {
   }
   if (!result) {
     console.log('[auth/apple] App Attest failed:', lastError?.message);
-    res.status(403).json({ error: 'App Attest verification failed' });
+    res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     return null;
   }
 

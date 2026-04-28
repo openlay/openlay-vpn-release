@@ -7,6 +7,11 @@ const config = require('../config');
 const CODE_VALUE_KEY = 'enrollment_code_value';
 const CODE_EXPIRES_KEY = 'enrollment_code_expires_at';
 
+// Same end-user-facing message as /api/connect's appAttest middleware so
+// the iOS / macOS app shows a single coherent line regardless of which
+// hop rejected the call.
+const APP_ATTEST_USER_ERROR = 'Only Apple App Store applications are allowed to connect.';
+
 const router = Router();
 
 // POST /api/enroll/challenge — Public endpoint to mint a one-time challenge
@@ -71,9 +76,8 @@ router.post('/', async (req, res) => {
       const attestation = req.body?.attestation;
       const attestChallenge = req.body?.attest_challenge ?? req.body?.attestChallenge;
       if (!attestKeyId || !attestation || !attestChallenge) {
-        return res.status(403).json({
-          error: 'attest_key_id, attestation, and attest_challenge are required for iOS/macOS enrollment',
-        });
+        console.log('[enroll] App Attest headers missing for', os);
+        return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
       }
 
       // Validate challenge: must exist, be unused, and not expired.
@@ -84,7 +88,8 @@ router.post('/', async (req, res) => {
         [attestChallenge]
       );
       if (challRows.length === 0) {
-        return res.status(403).json({ error: 'Invalid or expired attest_challenge' });
+        console.log('[enroll] invalid/expired attest_challenge');
+        return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
       }
 
       // Verify the attestation across all valid bundle ids.
@@ -108,7 +113,7 @@ router.post('/', async (req, res) => {
       }
       if (!attestResult) {
         console.log('[enroll] App Attest verification failed:', lastError?.message);
-        return res.status(403).json({ error: 'App Attest verification failed' });
+        return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
       }
 
       // Mark challenge consumed.

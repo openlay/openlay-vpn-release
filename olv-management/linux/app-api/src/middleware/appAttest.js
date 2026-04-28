@@ -3,6 +3,12 @@ const { verifyAssertion } = require('node-app-attest');
 const { pool } = require('../db/pool');
 const config = require('../config');
 
+// User-facing message for ALL App-Attest reject paths. We never expose
+// internal details (missing-headers vs verify-fail vs not-attested) to the
+// user — they all reduce to "your build can't talk to this server". Real
+// failure cause is logged server-side for debugging.
+const APP_ATTEST_USER_ERROR = 'Only Apple App Store applications are allowed to connect.';
+
 /**
  * Middleware to verify App Attest assertion on sensitive requests.
  *
@@ -57,9 +63,8 @@ async function appAttest(req, res, next) {
     deviceRow &&
     deviceRow.attest_env === 'development'
   ) {
-    return res.status(403).json({
-      error: 'This device was registered with a development build and cannot connect to production.',
-    });
+    console.log('[App Attest] rejecting development-environment device on production');
+    return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
   }
 
   const keyId = req.headers['x-app-attest-keyid'];
@@ -67,7 +72,8 @@ async function appAttest(req, res, next) {
   const { challenge } = req.body;
 
   if (!keyId || !assertionB64 || !challenge) {
-    return res.status(403).json({ error: 'App Attest required: X-App-Attest-KeyId, X-App-Attest-Assertion headers and challenge in body' });
+    console.log('[App Attest] missing X-App-Attest-KeyId / X-App-Attest-Assertion / challenge');
+    return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
   }
 
   try {
@@ -78,7 +84,8 @@ async function appAttest(req, res, next) {
     );
 
     if (challenges.length === 0) {
-      return res.status(403).json({ error: 'Invalid or expired challenge' });
+      console.log('[App Attest] invalid/expired challenge for user', req.user?.id);
+      return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     }
 
     // Mark challenge as used
@@ -91,7 +98,8 @@ async function appAttest(req, res, next) {
     );
 
     if (attestations.length === 0) {
-      return res.status(403).json({ error: 'Device not attested. Call /api/attest/verify first.' });
+      console.log('[App Attest] device not attested, keyId=', keyId);
+      return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     }
 
     const attest = attestations[0];
@@ -130,7 +138,7 @@ async function appAttest(req, res, next) {
 
     if (!result) {
       console.log('[App Attest] Assertion failed:', lastError?.message);
-      return res.status(403).json({ error: 'App Attest assertion failed' });
+      return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
     }
 
     // Update sign count
@@ -142,7 +150,7 @@ async function appAttest(req, res, next) {
     next();
   } catch (err) {
     console.error('[App Attest] Error:', err.message);
-    res.status(500).json({ error: 'App Attest verification error' });
+    res.status(500).json({ error: APP_ATTEST_USER_ERROR });
   }
 }
 
