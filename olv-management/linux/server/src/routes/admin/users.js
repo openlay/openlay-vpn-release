@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
+const { verifyAdminSignature } = require('../../services/adminSigning');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -178,6 +179,16 @@ router.put('/:id', async (req, res) => {
       return res.status(403).json({ error: `Cannot modify a ${targetRole} — insufficient privileges` });
     }
 
+    // Sign status / name changes (skip for alias-only — already short-circuited above).
+    let action = 'update_user';
+    const sigFields = { target_type: 'user', target_id: req.params.id };
+    if (status !== undefined && name === undefined) {
+      action = status === 'disabled' ? 'disable_user' : 'enable_user';
+      sigFields.status = status;
+    }
+    const sigCheck = await verifyAdminSignature(req, action, sigFields);
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     // Also update alias if provided alongside other fields
     if (alias !== undefined) {
       // Determine which enterprise to update alias for
@@ -250,6 +261,12 @@ router.delete('/:id', async (req, res) => {
     if ((ROLE_RANK[targetRole] || 0) >= callerRank) {
       return res.status(403).json({ error: `Cannot delete a ${targetRole} — insufficient privileges` });
     }
+
+    const sigCheck = await verifyAdminSignature(req, 'delete_user', {
+      target_type: 'user',
+      target_id: req.params.id,
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
 
     const { rowCount } = await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'User not found' });

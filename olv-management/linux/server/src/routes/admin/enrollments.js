@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
+const { verifyAdminSignature } = require('../../services/adminSigning');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -32,6 +33,7 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT id, enterprise_id AS "assignedEnterpriseId",
               device_name AS "deviceName", hardware_id AS "hardwareId",
+              public_key AS "publicKey",
               os, os_version AS "osVersion", status,
               approved_device_id AS "approvedDeviceId",
               approved_user_id AS "approvedUserId",
@@ -69,6 +71,24 @@ router.post('/:id/approve', async (req, res) => {
   const assignServerId = req.body.server_id || req.body.serverId || null;
   const assignInterfaceName = req.body.interface_name || req.body.interfaceName || null;
   const assignSubnetId = req.body.subnet_id || req.body.subnetId || null;
+
+  // Pre-fetch the enrollment so the canonical signed payload includes the
+  // device's hardware_id + public_key — this binds the admin's signature to
+  // the specific device, not just the enrollment row id.
+  const { rows: preview } = await pool.query(
+    `SELECT hardware_id, public_key FROM enrollment_requests WHERE id = $1`,
+    [req.params.id]
+  );
+  if (preview.length === 0) {
+    return res.status(404).json({ error: 'Enrollment request not found' });
+  }
+  const sigCheck = await verifyAdminSignature(req, 'approve_enrollment', {
+    target_type: 'enrollment',
+    target_id: req.params.id,
+    device_hardware_id: preview[0].hardware_id,
+    device_public_key: preview[0].public_key,
+  });
+  if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
 
   const client = await pool.connect();
   try {
@@ -230,6 +250,12 @@ router.post('/:id/approve', async (req, res) => {
 // POST /api/admin/enrollments/:id/reject
 router.post('/:id/reject', async (req, res) => {
   try {
+    const sigCheck = await verifyAdminSignature(req, 'reject_enrollment', {
+      target_type: 'enrollment',
+      target_id: req.params.id,
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     const { rows } = await pool.query(
       `UPDATE enrollment_requests
          SET status = 'rejected', updated_at = NOW()

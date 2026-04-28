@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { resyncRulesByUsers } = require('../../services/ruleOrchestrator');
+const { verifyAdminSignature } = require('../../services/adminSigning');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -24,12 +25,27 @@ router.get('/', async (req, res) => {
         da.key_id as attest_key_id, da.sign_count as attest_sign_count, da.created_at as attest_date,
         (SELECT COUNT(*) FROM device_postures dp WHERE dp.device_id = d.id) AS posture_count,
         (SELECT COUNT(*) FROM peers_meta pm WHERE pm.device_id = d.id) AS peer_count,
-        dp_prof.name as profile_name
+        dp_prof.name as profile_name,
+        approve_log.admin_user_id as approved_by_user_id,
+        approver.name as approved_by_name,
+        approver.email as approved_by_email,
+        approve_log.created_at as approved_at
         ${aliasEntId ? `, uer.alias as user_alias` : `, (SELECT uer2.alias FROM user_enterprise_roles uer2 WHERE uer2.user_id = u.id AND uer2.alias != '' ORDER BY uer2.created_at LIMIT 1) as user_alias`}
       FROM devices d
       LEFT JOIN users u ON d.user_id = u.id
       LEFT JOIN device_attestations da ON da.device_id = d.id
       LEFT JOIN device_profiles dp_prof ON dp_prof.id = d.profile_id
+      LEFT JOIN LATERAL (
+        SELECT al.admin_user_id, al.created_at
+          FROM admin_audit_log al
+          JOIN enrollment_requests er
+            ON er.id = al.target_id
+           AND er.approved_device_id = d.id
+         WHERE al.action = 'approve_enrollment'
+         ORDER BY al.created_at DESC
+         LIMIT 1
+      ) approve_log ON TRUE
+      LEFT JOIN users approver ON approver.id = approve_log.admin_user_id
       ${aliasEntId ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = '${aliasEntId.replace(/'/g, "''")}'` : ''}
     `;
     const conditions = [];
@@ -143,6 +159,21 @@ router.put('/:id', async (req, res) => {
     }
     const { name, status } = req.body;
     const profileIdRaw = req.body.profile_id !== undefined ? req.body.profile_id : req.body.profileId;
+
+    // Determine which "kind" of update this is — same payload, different
+    // canonical signed form so the audit log distinguishes a status flip
+    // from a profile assignment.
+    let action = 'update_device';
+    const sigFields = { target_type: 'device', target_id: req.params.id };
+    if (status !== undefined && name === undefined && profileIdRaw === undefined) {
+      action = status === 'disabled' ? 'disable_device' : 'enable_device';
+      sigFields.status = status;
+    } else if (profileIdRaw !== undefined && status === undefined && name === undefined) {
+      action = 'assign_device_profile';
+      sigFields.profile_id = profileIdRaw;
+    }
+    const sigCheck = await verifyAdminSignature(req, action, sigFields);
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
     const fields = [];
     const values = [];
     let idx = 1;
@@ -448,6 +479,12 @@ router.delete('/:id', async (req, res) => {
     if (!(await verifyDeviceAccess(req.params.id, req))) {
       return res.status(404).json({ error: 'Device not found' });
     }
+    const sigCheck = await verifyAdminSignature(req, 'delete_device', {
+      target_type: 'device',
+      target_id: req.params.id,
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     const { rowCount } = await pool.query('DELETE FROM devices WHERE id = $1', [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Device not found' });
     res.json({ deleted: true });

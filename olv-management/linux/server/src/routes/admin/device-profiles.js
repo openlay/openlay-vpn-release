@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
+const { verifyAdminSignature } = require('../../services/adminSigning');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -83,6 +84,13 @@ router.post('/', async (req, res) => {
     const dErr = validateDomainList(exclusion_domains);
     if (dErr) return res.status(400).json({ error: dErr });
 
+    const sigCheck = await verifyAdminSignature(req, 'create_device_profile', {
+      target_type: 'device_profile',
+      target_id: '',
+      name: name.trim(),
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     const { rows } = await pool.query(
       `INSERT INTO device_profiles
          (enterprise_id, name, description, allowed_ips, exclusion_ips,
@@ -162,6 +170,12 @@ router.put('/:id', async (req, res) => {
 
     if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
 
+    const sigCheck = await verifyAdminSignature(req, 'update_device_profile', {
+      target_type: 'device_profile',
+      target_id: req.params.id,
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     fields.push(`updated_at = NOW()`);
     values.push(req.params.id);
     values.push(req.enterpriseId);
@@ -186,6 +200,12 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     if (!requireEnterprise(req, res)) return;
+    const sigCheck = await verifyAdminSignature(req, 'delete_device_profile', {
+      target_type: 'device_profile',
+      target_id: req.params.id,
+    });
+    if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
+
     const { rowCount } = await pool.query(
       `DELETE FROM device_profiles WHERE id = $1 AND enterprise_id = $2`,
       [req.params.id, req.enterpriseId]

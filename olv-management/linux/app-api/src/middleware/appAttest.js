@@ -42,13 +42,27 @@ async function appAttest(req, res, next) {
     );
     if (rows.length > 0) {
       deviceRow = rows[0];
-      // App Attest is supported on iOS 14+ AND macOS 11+ (DCAppAttestService
-      // works on macOS Apple Silicon). Skip ONLY for non-Apple OSes
-      // (Linux/Windows/Android) where the framework doesn't exist.
+      // Skip non-Apple OS — DCAppAttestService doesn't exist on
+      // Linux/Windows/Android.
       if (!['ios', 'macos'].includes(deviceRow.os)) return next();
       // Password users authenticate via SE signature on /api/connect itself —
       // App Attest is redundant for them.
       if (deviceRow.auth_type === 'password') return next();
+      // PER-DEVICE GATE: enforce App Attest only when this specific device
+      // has an attestation record stored. Logic:
+      //   - At enroll, client may or may not provide attest fields. If
+      //     provided + verified → row in device_attestations. If not →
+      //     no row.
+      //   - Devices WITH attestation row → "trusted-attested": every
+      //     connect must verify a fresh assertion against stored pubkey.
+      //   - Devices WITHOUT attestation → SE signature on /api/connect
+      //     body is the trust anchor (already enforced in handler).
+      // This handles the macOS case where DCAppAttestService.isSupported
+      // is unreliable: macOS users where it works get the strict path,
+      // those where it doesn't fall back to SE-only without breaking.
+      if (!deviceRow.attest_env) {
+        return next();
+      }
     }
   }
 

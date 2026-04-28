@@ -6,9 +6,11 @@ const versionRouter = require('./version');
 const enrollmentCodeRouter = require('./enrollment-code');
 const enrollmentsRouter = require('./enrollments');
 const deviceProfilesRouter = require('./device-profiles');
+const meRouter = require('./me');
 
 const router = Router();
 
+router.use('/me', meRouter);
 router.use('/users', usersRouter);
 router.use('/devices', devicesRouter);
 router.use('/settings', settingsRouter);

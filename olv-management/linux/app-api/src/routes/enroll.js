@@ -60,64 +60,85 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'os must be macos, ios, windows, android, or linux' });
     }
 
-    // App Attest: required for iOS/macOS when the prod flag is set. Goal is to
-    // bind `publicKey` (which the client claims is its SE/HW key) to a real
-    // Apple-issued attestation of the same key — preventing a debug build or
-    // a curl script from registering an arbitrary publicKey via the enroll
-    // code. Skipped when SKIP_APP_ATTEST=true (staging).
+    // App Attest. Two independent decisions:
+    //   1) "Is the client providing attest fields?" → if yes, ALWAYS verify
+    //      and store them, regardless of production flag. The whole point of
+    //      enroll is to bind the client's claimed publicKey to a real Apple
+    //      attestation; skipping that work in dev means the connect path
+    //      then has nothing to verify against and rejects.
+    //   2) "Are attest fields REQUIRED?" → only when production flag is on.
+    //      Otherwise it's best-effort: missing attest is fine in dev,
+    //      provided attest still gets persisted.
+    // The previous version gated #1 behind the production flag too, which
+    // meant dev enrolls always discarded attest fields → device_attestations
+    // never created → middleware appAttest later 403'd on connect.
+    // App Attest policy:
+    //   - REQUIRE: only iOS in production mode. iOS devices reliably have
+    //     DCAppAttestService working, so we strictly enforce.
+    //   - VERIFY+STORE: any Apple OS that provides attest fields. macOS
+    //     where isSupported happens to be true gets stored too — that
+    //     promotes the device to "trusted" status, and the connect
+    //     middleware will require assertion on every call.
+    //   - SKIP: SKIP_APP_ATTEST=true (staging), or non-Apple OS.
+    const skipEntirely = config.skipAppAttest || !['ios', 'macos'].includes(os);
+    const requireAttest =
+      !config.skipAppAttest && config.appAttestProduction && os === 'ios';
+
     let attestResult = null;
-    const needsAppAttest =
-      !config.skipAppAttest &&
-      config.appAttestProduction &&
-      ['ios', 'macos'].includes(os);
+    const attestKeyIdProvided = req.body?.attest_key_id ?? req.body?.attestKeyId;
+    const attestationProvided = req.body?.attestation;
+    const attestChallengeProvided = req.body?.attest_challenge ?? req.body?.attestChallenge;
+    const attestProvided = !!(attestKeyIdProvided && attestationProvided && attestChallengeProvided);
 
-    if (needsAppAttest) {
-      const attestKeyId = req.body?.attest_key_id ?? req.body?.attestKeyId;
-      const attestation = req.body?.attestation;
-      const attestChallenge = req.body?.attest_challenge ?? req.body?.attestChallenge;
-      if (!attestKeyId || !attestation || !attestChallenge) {
-        console.log('[enroll] App Attest headers missing for', os);
+    if (!skipEntirely) {
+      if (requireAttest && !attestProvided) {
+        console.log('[enroll] App Attest required but missing for', os);
         return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
       }
-
-      // Validate challenge: must exist, be unused, and not expired.
-      const { rows: challRows } = await pool.query(
-        `SELECT id FROM attest_challenges
-          WHERE challenge = $1 AND user_id IS NULL AND used = FALSE AND expires_at > NOW()
-          LIMIT 1`,
-        [attestChallenge]
-      );
-      if (challRows.length === 0) {
-        console.log('[enroll] invalid/expired attest_challenge');
-        return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
-      }
-
-      // Verify the attestation across all valid bundle ids.
-      const allowDev = !config.appAttestProduction;
-      let lastError = null;
-      for (const bundleId of config.appleClientIds) {
-        try {
-          attestResult = await verifyAttestation({
-            attestation: Buffer.from(attestation, 'base64'),
-            challenge: attestChallenge,
-            keyId: attestKeyId,
-            bundleIdentifier: bundleId,
-            teamIdentifier: config.appleTeamId,
-            allowDevelopmentEnvironment: allowDev,
-          });
-          attestResult._bundleId = bundleId;
-          break;
-        } catch (err) {
-          lastError = err;
+      if (attestProvided) {
+        // Validate challenge: must exist, be unused, and not expired.
+        const { rows: challRows } = await pool.query(
+          `SELECT id FROM attest_challenges
+            WHERE challenge = $1 AND user_id IS NULL AND used = FALSE AND expires_at > NOW()
+            LIMIT 1`,
+          [attestChallengeProvided]
+        );
+        if (challRows.length === 0) {
+          console.log('[enroll] invalid/expired attest_challenge');
+          if (requireAttest) {
+            return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
+          }
+          // Best-effort mode: continue without storing attest.
+        } else {
+          const allowDev = !config.appAttestProduction;
+          let lastError = null;
+          for (const bundleId of config.appleClientIds) {
+            try {
+              attestResult = await verifyAttestation({
+                attestation: Buffer.from(attestationProvided, 'base64'),
+                challenge: attestChallengeProvided,
+                keyId: attestKeyIdProvided,
+                bundleIdentifier: bundleId,
+                teamIdentifier: config.appleTeamId,
+                allowDevelopmentEnvironment: allowDev,
+              });
+              attestResult._bundleId = bundleId;
+              break;
+            } catch (err) {
+              lastError = err;
+            }
+          }
+          if (!attestResult) {
+            console.log('[enroll] App Attest verification failed:', lastError?.message);
+            if (requireAttest) {
+              return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
+            }
+            // Best-effort: continue without storing attest.
+          } else {
+            await pool.query('UPDATE attest_challenges SET used = TRUE WHERE id = $1', [challRows[0].id]);
+          }
         }
       }
-      if (!attestResult) {
-        console.log('[enroll] App Attest verification failed:', lastError?.message);
-        return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
-      }
-
-      // Mark challenge consumed.
-      await pool.query('UPDATE attest_challenges SET used = TRUE WHERE id = $1', [challRows[0].id]);
     }
 
     // Reverse-lookup: find the enterprise whose current code matches.
@@ -166,7 +187,7 @@ router.post('/', async (req, res) => {
        RETURNING id`,
       [
         deviceName, hardwareId, os, osVersion || '', publicKey, enterpriseId,
-        attestResult ? (req.body?.attest_key_id ?? req.body?.attestKeyId) : null,
+        attestResult ? attestKeyIdProvided : null,
         attestResult ? attestResult.publicKey : null,
         attestResult ? attestResult.environment : null,
         attestResult ? attestResult._bundleId : null,
