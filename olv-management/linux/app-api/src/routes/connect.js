@@ -447,14 +447,17 @@ router.post('/', async (req, res) => {
     const ttlHours = await resolvePeerTtlHours(server.enterprise_id);
     const expiresAt = ttlHours > 0 ? new Date(Date.now() + ttlHours * 3600 * 1000).toISOString() : null;
 
-    // Save peer metadata
+    // Save peer metadata. assigned_ip is cached here so app-server target
+    // resolvers and route-policy ingress resolvers (typed pickers, M6)
+    // don't have to roundtrip the agent on every read.
+    const peerIpOnly = nextIp.split('/')[0];
     const { rows: peerMeta } = await pool.query(
-      `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, device_id, user_id, expires_at, is_expired)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+      `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, device_id, user_id, expires_at, is_expired, assigned_ip)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9)
        ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
-       SET subnet_id = $4, alias = $5, device_id = $6, user_id = $7, expires_at = $8, is_expired = FALSE
+       SET subnet_id = $4, alias = $5, device_id = $6, user_id = $7, expires_at = $8, is_expired = FALSE, assigned_ip = $9
        RETURNING id`,
-      [server.id, interfaceName, wgPublicKey, subnetId, alias, device.id, req.user.id, expiresAt]
+      [server.id, interfaceName, wgPublicKey, subnetId, alias, device.id, req.user.id, expiresAt, peerIpOnly]
     );
 
     // Stamp last successful connect on the device so the admin UI can show
@@ -480,11 +483,23 @@ router.post('/', async (req, res) => {
     // app_users or be a member of a granted user_group. Reachability is
     // implicit — apps live in this server's subnet, so VPN routing
     // already brings the user to them.
+    //
+    // target_type ∈ {ip, user, device}:
+    //   - ip      → use a.ip directly (always reachable)
+    //   - user    → join peers_meta on target_user_id, latest device's
+    //               assigned_ip; reachable=false when offline
+    //   - device  → join peers_meta on target_device_id directly
+    //
+    // We do the resolution server-side and emit { ip, reachable } so
+    // client renders entries even when target peer is currently offline
+    // (with an "unreachable" badge).
     let application_servers = [];
     try {
       const { rows } = await pool.query(
-        `SELECT a.id, a.name, a.description, a.ip::text AS ip,
-                a.port, a.local_port, a.server_id
+        `SELECT a.id, a.name, a.description, a.target_type,
+                a.ip::text          AS ip,
+                a.target_user_id, a.target_device_id,
+                a.port, a.server_id
          FROM application_servers a
          WHERE a.server_id = $1 AND a.enabled = TRUE
          AND (
@@ -498,10 +513,55 @@ router.post('/', async (req, res) => {
              WHERE g.app_id = a.id AND m.user_id = $2
            )
          )
-         ORDER BY a.local_port`,
+         ORDER BY a.name`,
         [server.id, req.user.id]
       );
-      application_servers = rows;
+      // Resolve typed targets to concrete IPs by joining peers_meta.
+      // Doing it as N small queries instead of one big LATERAL join
+      // because there's only a handful of apps per user.
+      for (const a of rows) {
+        let resolvedIp = null;
+        let reachable = false;
+        if (a.target_type === 'ip') {
+          resolvedIp = a.ip;
+          reachable = true;
+        } else if (a.target_type === 'user' && a.target_user_id) {
+          const { rows: pm } = await pool.query(
+            `SELECT pm.assigned_ip::text AS ip
+               FROM peers_meta pm
+               LEFT JOIN devices d ON d.id = pm.device_id
+              WHERE pm.server_id = $1 AND pm.user_id = $2
+                AND pm.assigned_ip IS NOT NULL
+                AND COALESCE(pm.is_expired, FALSE) = FALSE
+              ORDER BY COALESCE(d.last_connect_at, pm.created_at) DESC
+              LIMIT 1`,
+            [server.id, a.target_user_id]
+          );
+          if (pm[0]) { resolvedIp = pm[0].ip; reachable = true; }
+        } else if (a.target_type === 'device' && a.target_device_id) {
+          const { rows: pm } = await pool.query(
+            `SELECT assigned_ip::text AS ip
+               FROM peers_meta
+              WHERE server_id = $1 AND device_id = $2
+                AND assigned_ip IS NOT NULL
+                AND COALESCE(is_expired, FALSE) = FALSE
+              ORDER BY created_at DESC
+              LIMIT 1`,
+            [server.id, a.target_device_id]
+          );
+          if (pm[0]) { resolvedIp = pm[0].ip; reachable = true; }
+        }
+        application_servers.push({
+          id: a.id,
+          name: a.name,
+          description: a.description,
+          server_id: a.server_id,
+          target_type: a.target_type,
+          port: a.port,
+          ip: resolvedIp,         // resolved IP — null if unreachable
+          reachable,              // client-side hint
+        });
+      }
     } catch (asErr) {
       console.error('[connect] load application_servers failed:', asErr.message);
     }

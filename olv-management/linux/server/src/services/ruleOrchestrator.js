@@ -216,17 +216,20 @@ async function resyncRulesWhere(serverId, predicate) {
   const all = await client.firewallListAllRules();
   const byIface = all.interfaces || {};
 
+  // Collect ALL physical rules per affected group (need them to diff
+  // current vs. resolved IP set cheaply, before deciding to rebuild).
   const affectedGroups = new Map();
   for (const [iface, rules] of Object.entries(byIface)) {
     for (const rule of rules) {
       if (!rule.groupId) continue;
       if (!predicate(rule)) continue;
       const key = `${iface}::${rule.groupId}`;
-      if (!affectedGroups.has(key)) affectedGroups.set(key, { iface, rule });
+      if (!affectedGroups.has(key)) affectedGroups.set(key, { iface, rule, members: [] });
+      affectedGroups.get(key).members.push(rule);
     }
   }
 
-  for (const { iface, rule } of affectedGroups.values()) {
+  for (const { iface, rule, members } of affectedGroups.values()) {
     const body = {
       srcZoneId: rule.srcZoneId,
       dstZoneId: rule.dstZoneId,
@@ -261,6 +264,29 @@ async function resyncRulesWhere(serverId, predicate) {
         console.warn(`[ruleOrchestrator] skip resync for group ${rule.groupId}: referenced IP set is currently empty`);
         continue;
       }
+
+      // Diff before push. Reconnect storms with static IPs are common
+      // (laptop wake, mobile NAT churn) and ALL of them used to trigger
+      // remove+rebuild even when the resolved IP cross-product was
+      // unchanged — wasted N pf reloads per static-IP reconnect.
+      // Compare the current (srcIP, dstIP) pair set on the agent with
+      // what we'd freshly emit; skip if identical.
+      const currentPairs = new Set(members.map(m =>
+        `${m.srcIP ?? ''}|${m.dstIP ?? ''}`));
+      const desiredPairs = new Set();
+      for (const s of srcIPs) {
+        for (const d of dstIPs) {
+          desiredPairs.add(`${s ?? ''}|${d ?? ''}`);
+        }
+      }
+      let same = currentPairs.size === desiredPairs.size;
+      if (same) {
+        for (const k of currentPairs) {
+          if (!desiredPairs.has(k)) { same = false; break; }
+        }
+      }
+      if (same) continue;
+
       await client.firewallRemoveGroup(iface, rule.groupId);
       await createLogicalRule(serverId, iface, body);
     } catch (err) {

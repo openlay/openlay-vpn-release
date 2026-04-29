@@ -30,6 +30,7 @@ const natRouter = require('./routes/nat');
 const portForwardsRouter = require('./routes/port-forwards');
 const sitesRouter = require('./routes/sites');
 const applicationServersRouter = require('./routes/application-servers');
+const serverPeersRouter = require('./routes/server-peers');
 const migrateRouter = require('./routes/migrate');
 const setupRouter = require('./routes/setup');
 const caManager = require('./services/caManager');
@@ -56,6 +57,7 @@ app.use('/api/servers/:serverId/nat', natRouter);
 app.use('/api/servers/:serverId/port-forwards', portForwardsRouter);
 app.use('/api/servers/:serverId/sites', sitesRouter);
 app.use('/api/servers/:serverId/application-servers', applicationServersRouter);
+app.use('/api/servers/:serverId/server-peers', serverPeersRouter);
 // POST /api/servers/:destId/migrate-from/:sourceId — root-only server clone.
 app.use('/api/servers/:destId/migrate-from', migrateRouter);
 app.use('/api/dashboard', dashboardRouter);

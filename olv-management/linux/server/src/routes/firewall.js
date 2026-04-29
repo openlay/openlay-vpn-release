@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { createLogicalRule, deleteLogicalRule, groupPhysicalRules, resyncRulesByUsers, resyncRulesByZone, resyncRulesByAlias } = require('../services/ruleOrchestrator');
+const { resyncPoliciesByUsers } = require('../services/policyResync');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
@@ -142,6 +143,13 @@ router.post('/resync-users', async (req, res) => {
     await getClient(req.params.serverId, req);
     const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
     await resyncRulesByUsers(parseInt(req.params.serverId), userIds);
+    // Also rebuild route_policies whose typed ingress (users/group/device)
+    // references these users — same trigger, same intent.
+    try {
+      await resyncPoliciesByUsers(parseInt(req.params.serverId), userIds);
+    } catch (err) {
+      console.error('[firewall.resync-users] policy resync failed:', err.message);
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

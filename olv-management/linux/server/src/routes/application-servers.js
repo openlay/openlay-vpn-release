@@ -1,11 +1,12 @@
 // Admin CRUD for Application Servers — per-VPN-server scope.
 //
 // An Application Server is a registry entry under one VPN server,
-// describing an internal IP:port that some users/groups are entitled
-// to access while VPN'd in. The parent server defines which subnet
-// the IP lives in, so the (ip, port) is only meaningful in that
-// context. ACL grants are scoped to the server's enterprise (or any
-// user/group caller can name when they're root).
+// describing an internal service (port + target) that some users/groups
+// are entitled to access while VPN'd in. Three target shapes:
+//   - ip      → static internal IP (e.g. 10.88.0.5)
+//   - user    → resolves at /api/connect time to that user's most
+//               recently connected device's peer IP on this server
+//   - device  → direct device → peer IP lookup
 //
 // JSON convention: snake_case on the wire (per repo-wide rule).
 const { Router } = require('express');
@@ -14,6 +15,8 @@ const enterpriseContext = require('../middleware/enterpriseContext');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
+
+const TARGET_COLS = ['ip', 'target_user_id', 'target_device_id'];
 
 async function verifyAccess(serverId, req) {
   const isRoot = req.enterpriseRole === 'root';
@@ -34,6 +37,28 @@ function requireAdmin(req, res) {
     return false;
   }
   return true;
+}
+
+/** Validate body for target_type + matching reference field. Returns
+ *  { target_type, ip, target_user_id, target_device_id } with the
+ *  unused fields nulled out, or throws status-tagged Error. */
+function pickTarget(body) {
+  const t = body.target_type || 'ip';
+  if (!['ip', 'user', 'device'].includes(t)) {
+    throw Object.assign(new Error("target_type must be one of: ip, user, device"), { status: 400 });
+  }
+  const out = { target_type: t, ip: null, target_user_id: null, target_device_id: null };
+  if (t === 'ip') {
+    if (!body.ip) throw Object.assign(new Error('ip is required when target_type=ip'), { status: 400 });
+    out.ip = body.ip;
+  } else if (t === 'user') {
+    if (!body.target_user_id) throw Object.assign(new Error('target_user_id is required when target_type=user'), { status: 400 });
+    out.target_user_id = body.target_user_id;
+  } else if (t === 'device') {
+    if (!body.target_device_id) throw Object.assign(new Error('target_device_id is required when target_type=device'), { status: 400 });
+    out.target_device_id = body.target_device_id;
+  }
+  return out;
 }
 
 async function loadAcl(appIds) {
@@ -75,6 +100,27 @@ async function writeAcl(dbClient, appId, userIds, groupIds) {
   }
 }
 
+function shapeRow(r, acl) {
+  // Stringify INET so iOS APIClient gets a string, not a Postgres-typed
+  // marker.
+  return {
+    id: r.id,
+    server_id: r.server_id,
+    name: r.name,
+    description: r.description,
+    target_type: r.target_type,
+    ip: r.ip ? String(r.ip) : null,
+    target_user_id: r.target_user_id,
+    target_device_id: r.target_device_id,
+    port: r.port,
+    enabled: r.enabled,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    user_ids: acl?.users?.[r.id] || [],
+    group_ids: acl?.groups?.[r.id] || [],
+  };
+}
+
 // GET /api/servers/:serverId/application-servers
 router.get('/', async (req, res) => {
   try {
@@ -85,11 +131,7 @@ router.get('/', async (req, res) => {
     );
     const acl = await loadAcl(rows.map(r => r.id));
     res.json({
-      application_servers: rows.map(r => ({
-        ...r,
-        user_ids: acl.users[r.id] || [],
-        group_ids: acl.groups[r.id] || [],
-      })),
+      application_servers: rows.map(r => shapeRow(r, acl)),
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -102,39 +144,32 @@ router.post('/', async (req, res) => {
     await verifyAccess(req.params.serverId, req);
     const b = req.body || {};
     if (!b.name) return res.status(400).json({ error: 'name is required' });
-    if (!b.ip) return res.status(400).json({ error: 'ip is required' });
     if (!b.port) return res.status(400).json({ error: 'port is required' });
-    if (!b.local_port) return res.status(400).json({ error: 'local_port is required' });
+    const target = pickTarget(b);
 
     const dbClient = await pool.connect();
     try {
       await dbClient.query('BEGIN');
       const { rows } = await dbClient.query(
         `INSERT INTO application_servers
-           (server_id, name, description, ip, port, local_port, enabled)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+           (server_id, name, description, target_type, ip, target_user_id, target_device_id, port, enabled)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
         [req.params.serverId, b.name, b.description || null,
-         b.ip, b.port, b.local_port,
-         b.enabled === undefined ? true : !!b.enabled]
+         target.target_type, target.ip, target.target_user_id, target.target_device_id,
+         b.port, b.enabled === undefined ? true : !!b.enabled]
       );
       await writeAcl(dbClient, rows[0].id, b.user_ids, b.group_ids);
       await dbClient.query('COMMIT');
-      res.status(201).json({
-        ...rows[0],
-        user_ids: b.user_ids || [],
-        group_ids: b.group_ids || [],
-      });
+      const acl = { users: { [rows[0].id]: b.user_ids || [] }, groups: { [rows[0].id]: b.group_ids || [] } };
+      res.status(201).json(shapeRow(rows[0], acl));
     } catch (dbErr) {
       await dbClient.query('ROLLBACK').catch(() => {});
       if (dbErr.code === '23505') {
-        const isPort = String(dbErr.detail || '').includes('local_port');
-        return res.status(409).json({
-          error: isPort ? `local_port ${b.local_port} already used on this server`
-                        : `name "${b.name}" already exists on this server`,
-        });
+        return res.status(409).json({ error: `name "${b.name}" already exists on this server` });
       }
       if (dbErr.code === '22P02') return res.status(400).json({ error: 'ip is not a valid INET' });
-      if (dbErr.code === '23514') return res.status(400).json({ error: 'port out of range (1-65535)' });
+      if (dbErr.code === '23514') return res.status(400).json({ error: dbErr.message });
+      if (dbErr.code === '23503') return res.status(400).json({ error: 'target user/device does not exist' });
       throw dbErr;
     } finally {
       dbClient.release();
@@ -157,11 +192,28 @@ router.put('/:id', async (req, res) => {
     const set = [];
     const vals = [];
     let idx = 1;
-    const cols = ['name', 'description', 'ip', 'port', 'local_port', 'enabled'];
+    const cols = ['name', 'description', 'port', 'enabled'];
     for (const c of cols) {
       if (req.body[c] === undefined) continue;
       set.push(`${c} = $${idx++}`);
       vals.push(req.body[c]);
+    }
+    // Target type change: if any of (target_type, ip, target_user_id, target_device_id)
+    // is touched, reset all 4 atomically based on new shape.
+    const targetTouched = req.body.target_type !== undefined
+      || TARGET_COLS.some(c => req.body[c] !== undefined);
+    if (targetTouched) {
+      const merged = {
+        target_type: req.body.target_type ?? existing[0].target_type,
+        ip: req.body.ip ?? existing[0].ip,
+        target_user_id: req.body.target_user_id ?? existing[0].target_user_id,
+        target_device_id: req.body.target_device_id ?? existing[0].target_device_id,
+      };
+      const shaped = pickTarget(merged);
+      set.push(`target_type = $${idx++}`);      vals.push(shaped.target_type);
+      set.push(`ip = $${idx++}`);                vals.push(shaped.ip);
+      set.push(`target_user_id = $${idx++}`);    vals.push(shaped.target_user_id);
+      set.push(`target_device_id = $${idx++}`);  vals.push(shaped.target_device_id);
     }
     const aclTouched = req.body.user_ids !== undefined || req.body.group_ids !== undefined;
     if (set.length === 0 && !aclTouched) {
@@ -187,11 +239,12 @@ router.put('/:id', async (req, res) => {
       }
       await dbClient.query('COMMIT');
       const acl = await loadAcl([row.id]);
-      res.json({ ...row, user_ids: acl.users[row.id] || [], group_ids: acl.groups[row.id] || [] });
+      res.json(shapeRow(row, acl));
     } catch (dbErr) {
       await dbClient.query('ROLLBACK').catch(() => {});
-      if (dbErr.code === '23505') return res.status(409).json({ error: 'name or local_port conflict' });
+      if (dbErr.code === '23505') return res.status(409).json({ error: 'name conflict on this server' });
       if (dbErr.code === '22P02') return res.status(400).json({ error: 'ip is not a valid INET' });
+      if (dbErr.code === '23514') return res.status(400).json({ error: dbErr.message });
       throw dbErr;
     } finally {
       dbClient.release();
