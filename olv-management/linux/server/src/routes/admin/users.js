@@ -23,6 +23,12 @@ router.get('/', async (req, res) => {
     const conditions = [];
     const params = [];
 
+    // Hide soft-deleted users from the default list. Audit views can opt-in
+    // via ?include_deleted=true (currently unused; left as a future hook).
+    if (req.query.include_deleted !== 'true') {
+      conditions.push(`u.status <> 'deleted'`);
+    }
+
     // Enterprise scope — always filter by enterprise when one is selected,
     // even for root users (prevents cross-enterprise assignment errors)
     if (req.enterpriseId) {
@@ -86,6 +92,11 @@ router.get('/:id', async (req, res) => {
       [req.params.id]
     );
     if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+    // Soft-deleted users behave like 404 for the default detail view —
+    // their PII is gone, role memberships are stripped, no point rendering.
+    if (users[0].status === 'deleted' && req.query.include_deleted !== 'true') {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const { rows: devices } = await pool.query(
       `SELECT d.*,
@@ -240,7 +251,24 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/admin/users/:id
+// DELETE /api/admin/users/:id — SOFT delete.
+// Keeps the users row with status='deleted' + nullified PII so historical
+// references (admin_audit_log.admin_user_id, peers_meta.user_id once the
+// peer rows themselves are nuked, enrollment_requests.approved_user_id,
+// enterprise_settings.created_by, etc.) stay attributable. Live
+// relationships (devices, sessions, peer rows, ACL memberships, group
+// memberships, attest challenges, root flag) are hard-deleted so the user
+// can't reconnect after this returns.
+//
+// Order matters:
+//   1. Fast-path guards (cheap, no DB writes).
+//   2. Admin signature verification (writes audit row — must succeed before
+//      we touch state).
+//   3. Out-of-band agent calls (removePeer) — done BEFORE the DB transaction
+//      so a hung agent doesn't hold a lock.
+//   4. Single transaction: snapshot PII → soft-delete user + cascade
+//      relationship cleanup → revoke sessions → drop devices/peers/ACL/etc.
+//   5. Best-effort agent rule resync after commit.
 router.delete('/:id', async (req, res) => {
   try {
     // #7 — Block self-delete. A logged-in admin should never be able to
@@ -249,6 +277,19 @@ router.delete('/:id', async (req, res) => {
     // delete themselves to bypass an investigation.
     if (req.user.id === req.params.id) {
       return res.status(400).json({ error: 'You cannot delete your own account.' });
+    }
+
+    // Look up target row up-front so subsequent checks can avoid duplicate
+    // queries. Reject early if the row is already soft-deleted (idempotency).
+    const { rows: targetRows } = await pool.query(
+      'SELECT id, name, email, username, status FROM users WHERE id = $1',
+      [req.params.id]
+    );
+    if (targetRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (targetRows[0].status === 'deleted') {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     if (req.enterpriseRole !== 'root') {
@@ -272,7 +313,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(403).json({ error: `Cannot delete a ${targetRole} — insufficient privileges` });
     }
 
-    // #5 — Block deleting the last admin of any enterprise. Without this,
+    // Block deleting the last admin of any enterprise. Without this,
     // an enterprise can be left with only members → no one can manage it.
     // Per-enterprise check: for every enterprise where target user is
     // admin/super_admin, count OTHER admins. Reject if any has 0.
@@ -297,6 +338,20 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
+    // Block deleting an enterprise owner. Hard-cleared `owner_user_id` would
+    // leave the enterprise ownerless without a clear audit trail. Admin
+    // must transfer ownership manually before the user can be deleted.
+    const { rows: ownerCheck } = await pool.query(
+      'SELECT id, name FROM enterprises WHERE owner_user_id = $1',
+      [req.params.id]
+    );
+    if (ownerCheck.length > 0) {
+      const names = ownerCheck.map(r => r.name).join(', ');
+      return res.status(409).json({
+        error: `Cannot delete: user is owner of ${names}. Transfer ownership first.`,
+      });
+    }
+
     const sigCheck = await verifyAdminSignature(req, 'delete_user', {
       target_type: 'user',
       target_id: req.params.id,
@@ -305,8 +360,9 @@ router.delete('/:id', async (req, res) => {
 
     // Gather every WG peer (server_id + interface + public_key) tied to this
     // user — both directly via pm.user_id and via the user's devices. We
-    // grab this BEFORE the DELETE so the FK ON DELETE SET NULL on
-    // peers_meta.user_id / .device_id doesn't erase the linkage.
+    // grab this BEFORE the soft-delete so the FK SET NULL on
+    // peers_meta.user_id (when we drop devices below) doesn't erase the
+    // linkage we need for agent removePeer calls.
     const { rows: peerRows } = await pool.query(
       `SELECT DISTINCT pm.server_id, pm.interface_name, pm.public_key
          FROM peers_meta pm
@@ -315,12 +371,11 @@ router.delete('/:id', async (req, res) => {
       [req.params.id]
     );
 
-    // #2 — Collect every server that has rules / ACLs referencing this
-    // user, so we can resync agent firewall rules AFTER the DELETE.
-    // Without this, srcUserId/dstUserId in stored rules dangle: agent
-    // keeps applying iptables/pf rules that reference an IP set the
-    // server now believes is empty (or worse, the next user to be
-    // assigned the same IP inherits the previous tenant's permissions).
+    // Collect every server that has rules / ACLs referencing this user, so
+    // we can resync agent firewall rules AFTER the transaction commits.
+    // Without this, srcUserId/dstUserId in stored rules dangle: agent keeps
+    // applying iptables/pf rules that reference an IP set the server now
+    // believes is empty.
     const { rows: serverRows } = await pool.query(
       `SELECT DISTINCT s.id AS server_id FROM (
          SELECT server_id FROM peers_meta WHERE user_id = $1
@@ -337,10 +392,9 @@ router.delete('/:id', async (req, res) => {
     );
     const affectedServerIds = serverRows.map(r => r.server_id);
 
-    // #3 — Parallel agent.removePeer calls. Sequential loop with N peers
-    // × ~3s/RPC easily exceeds Express's 120s timeout for an enterprise
-    // with many devices. allSettled because failures of unrelated agents
-    // shouldn't block the others.
+    // Parallel agent.removePeer calls — done OUTSIDE the DB transaction so a
+    // slow/unreachable agent doesn't hold a row lock. allSettled because
+    // failures of unrelated agents shouldn't block the others.
     const removeResults = await Promise.allSettled(
       peerRows.map(p => {
         const client = new AgentClient(parseInt(p.server_id, 10));
@@ -356,33 +410,139 @@ router.delete('/:id', async (req, res) => {
       }
     });
 
-    // CASCADE on users.id removes:
-    //   - devices (and via devices: device_static_ips, device_attestations,
-    //     device_postures, auth_sessions all CASCADE)
-    //   - user_server_assignments (CASCADE)
-    //   - user_enterprise_roles (CASCADE)
-    //   - application_server_users (CASCADE)
-    //   - root_users (CASCADE), attest_challenges (CASCADE), user_group_members (CASCADE)
-    // peers_meta keeps the row but flips user_id/device_id to NULL — clean
-    // those up explicitly so the admin doesn't see orphan rows in the UI.
-    const { rowCount } = await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
-    if (peerRows.length > 0) {
-      await pool.query(
-        `DELETE FROM peers_meta
-          WHERE (server_id, interface_name, public_key) IN (
-            SELECT * FROM UNNEST($1::int[], $2::text[], $3::text[])
-          )`,
-        [
-          peerRows.map(p => p.server_id),
-          peerRows.map(p => p.interface_name),
-          peerRows.map(p => p.public_key),
-        ]
+    // ── Snapshot route_policies that reference this user ────────────────
+    // Must be done BEFORE the cascade deletes (route_policy_users,
+    // user_group_members, devices) wipe the membership rows, otherwise
+    // resyncPoliciesByUsers's intersection query would miss them and the
+    // agent's pf rules stay stale referencing the deleted user's IP.
+    //
+    // For type='users'/'group' the policy itself stays (just rebuild
+    // without this user). For type='device' the policy ROW gets
+    // CASCADE-deleted along with the device, so we capture (server,
+    // policy_name) pairs to force-remove from agent.
+    const { rows: policySnapshot } = await pool.query(
+      `SELECT p.id, p.server_id, p.name, p.ingress_type
+         FROM route_policies p
+        WHERE
+          (p.ingress_type = 'users' AND EXISTS (
+             SELECT 1 FROM route_policy_users rpu
+              WHERE rpu.policy_id = p.id AND rpu.user_id = $1
+          ))
+          OR (p.ingress_type = 'group' AND EXISTS (
+             SELECT 1 FROM user_group_members ugm
+              WHERE ugm.user_group_id = p.ingress_group_id AND ugm.user_id = $1
+          ))
+          OR (p.ingress_type = 'device' AND EXISTS (
+             SELECT 1 FROM devices d
+              WHERE d.id = p.ingress_device_id AND d.user_id = $1
+          ))`,
+      [req.params.id]
+    );
+
+    // ── Transaction ──────────────────────────────────────────────────────
+    // Anything that mutates `users` or its dependents goes through this
+    // single connection so a failure leaves the DB consistent (admin can
+    // retry).
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Soft-delete the user row + nullify PII. The WHERE status<>'deleted'
+      // makes this a no-op-safe re-issue (idempotency at the SQL layer too).
+      const { rowCount: softCount } = await client.query(
+        `UPDATE users
+            SET status                   = 'deleted',
+                email                    = NULL,
+                name                     = NULL,
+                username                 = NULL,
+                public_key               = NULL,
+                apple_id                 = NULL,
+                admin_signing_public_key = NULL,
+                locked_device_id         = NULL,
+                deleted_at               = NOW(),
+                deleted_by_user_id       = $2,
+                updated_at               = NOW()
+          WHERE id = $1 AND status <> 'deleted'`,
+        [req.params.id, req.user.id]
       );
+      if (softCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Revoke active access sessions. We can't CASCADE-delete auth_sessions
+      // (the user row is staying), so flip revoked_at instead — both
+      // jwtAuth.loadSessionValidity and audit reads treat revoked sessions
+      // as inactive.
+      await client.query(
+        `UPDATE auth_sessions SET revoked_at = NOW()
+          WHERE user_id = $1 AND revoked_at IS NULL`,
+        [req.params.id]
+      );
+
+      // Hard-delete devices. CASCADE chain takes care of:
+      //   device_static_ips, device_attestations, device_postures
+      // and via peers_meta.device_id ON DELETE SET NULL — that NULL gets
+      // mopped up immediately below.
+      await client.query('DELETE FROM devices WHERE user_id = $1', [req.params.id]);
+
+      // Live relationships — gone now that the user is terminated. Each is
+      // a small targeted DELETE to avoid relying on CASCADE chains we don't
+      // own.
+      await client.query('DELETE FROM user_server_assignments WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM user_enterprise_roles    WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM user_group_members       WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM application_server_users WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM root_users               WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM attest_challenges        WHERE user_id = $1', [req.params.id]);
+
+      // peers_meta orphan cleanup — at this point any pm.user_id matching
+      // the deleted user is NULL (FK SET NULL) and pm.device_id is also NULL
+      // (devices CASCADE just fired). The composite (server_id,iface,pubkey)
+      // we captured above is the safe identifier.
+      if (peerRows.length > 0) {
+        await client.query(
+          `DELETE FROM peers_meta
+             WHERE (server_id, interface_name, public_key) IN (
+               SELECT * FROM UNNEST($1::int[], $2::text[], $3::text[])
+             )`,
+          [
+            peerRows.map(p => p.server_id),
+            peerRows.map(p => p.interface_name),
+            peerRows.map(p => p.public_key),
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
 
-    // #2 (continued) — resync rules per affected server. Best-effort: a
-    // single failing server doesn't unwind the delete (user is gone from
-    // DB by now, retry would 404). Errors are logged for ops follow-up.
+    // Resync rules per affected server — best-effort, post-commit. A single
+    // failing server doesn't unwind the delete (user is already terminated;
+    // retry would 404). Errors are logged for ops follow-up.
+    //
+    // resyncRulesByUsers internally chains policy resync via current
+    // membership query — but route_policy_users / user_group_members
+    // rows for this user are already gone by now, so it'd miss the
+    // affected policies. We use the pre-cascade snapshot instead.
+    const { resyncPoliciesByIds } = require('../../services/policyResync');
+    const policiesByServer = new Map();        // serverId → [policyId,...]
+    const removedNamesByServer = new Map();    // serverId → [policyName,...] for type='device' (CASCADE-deleted)
+    for (const ps of policySnapshot) {
+      if (ps.ingress_type === 'device') {
+        if (!removedNamesByServer.has(ps.server_id)) removedNamesByServer.set(ps.server_id, []);
+        removedNamesByServer.get(ps.server_id).push(ps.name);
+      } else {
+        if (!policiesByServer.has(ps.server_id)) policiesByServer.set(ps.server_id, []);
+        policiesByServer.get(ps.server_id).push(ps.id);
+      }
+    }
+    const allPolicyServers = new Set([...policiesByServer.keys(), ...removedNamesByServer.keys()]);
     await Promise.allSettled(
       affectedServerIds.map(async sid => {
         try {
@@ -392,9 +552,21 @@ router.delete('/:id', async (req, res) => {
         }
       })
     );
+    await Promise.allSettled(
+      [...allPolicyServers].map(async sid => {
+        try {
+          await resyncPoliciesByIds(
+            sid,
+            policiesByServer.get(sid) || [],
+            removedNamesByServer.get(sid) || []
+          );
+        } catch (e) {
+          console.warn(`[users/delete] resyncPoliciesByIds failed for server=${sid}: ${e.message}`);
+        }
+      })
+    );
 
-    if (rowCount === 0) return res.status(404).json({ error: 'User not found' });
-    res.json({ deleted: true });
+    res.json({ deleted: true, soft: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

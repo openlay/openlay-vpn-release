@@ -485,8 +485,35 @@ router.delete('/:id', async (req, res) => {
     });
     if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
 
+    // Snapshot route_policies pointing at this device BEFORE the DELETE.
+    // The CASCADE on route_policies.ingress_device_id will wipe the row
+    // entirely, leaving the agent with an orphan pf rule unless we
+    // explicitly remove it by name.
+    const { rows: orphanPolicies } = await pool.query(
+      `SELECT server_id, name FROM route_policies
+        WHERE ingress_type = 'device' AND ingress_device_id = $1`,
+      [req.params.id]
+    );
+
     const { rowCount } = await pool.query('DELETE FROM devices WHERE id = $1', [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Device not found' });
+
+    // Force-remove the now-orphaned agent rules.
+    if (orphanPolicies.length > 0) {
+      const { resyncPoliciesByIds } = require('../../services/policyResync');
+      const byServer = new Map();
+      for (const p of orphanPolicies) {
+        if (!byServer.has(p.server_id)) byServer.set(p.server_id, []);
+        byServer.get(p.server_id).push(p.name);
+      }
+      await Promise.allSettled(
+        [...byServer.entries()].map(async ([sid, names]) => {
+          try { await resyncPoliciesByIds(sid, [], names); }
+          catch (e) { console.warn(`[devices/delete] policy cleanup server=${sid}: ${e.message}`); }
+        })
+      );
+    }
+
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

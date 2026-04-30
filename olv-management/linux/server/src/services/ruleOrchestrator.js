@@ -209,6 +209,16 @@ async function resyncRulesByUsers(serverId, userIds) {
   if (rows.length > 0) {
     await resyncRulesByZone(serverId, rows[0].id);
   }
+  // Route policies share the same user→IP dependency as firewall rules,
+  // so any caller of this fn (peer connect/disconnect, user delete,
+  // device delete) automatically gets policy state synced too. Lazy-
+  // require to avoid a hard dependency at module init.
+  try {
+    const { resyncPoliciesByUsers } = require('./policyResync');
+    await resyncPoliciesByUsers(serverId, userIds);
+  } catch (err) {
+    console.error(`[ruleOrchestrator] policy resync failed:`, err.message);
+  }
 }
 
 async function resyncRulesWhere(serverId, predicate) {

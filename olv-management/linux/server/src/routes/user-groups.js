@@ -25,6 +25,40 @@ async function getUserGroupEnterprise(userGroupId) {
   return r.rows[0]?.enterprise_id || null;
 }
 
+/**
+ * Re-sync agent route_policies on every server that has a policy with
+ * ingress_type='group' referencing this group, after the group's
+ * membership changed. Queries by ingress_group_id directly (NOT by
+ * user intersection) — the membership row may have been deleted
+ * already, so user-intersection queries miss it.
+ */
+async function resyncPoliciesAfterGroupChange(groupId) {
+  let resyncPoliciesByIds;
+  try {
+    ({ resyncPoliciesByIds } = require('../services/policyResync'));
+  } catch (err) {
+    console.error('[user-groups] policyResync require failed:', err.message);
+    return;
+  }
+  const { rows } = await pool.query(
+    `SELECT id, server_id FROM route_policies
+       WHERE ingress_type = 'group' AND ingress_group_id = $1`,
+    [groupId]
+  );
+  const byServer = new Map();
+  for (const r of rows) {
+    if (!byServer.has(r.server_id)) byServer.set(r.server_id, []);
+    byServer.get(r.server_id).push(r.id);
+  }
+  for (const [serverId, ids] of byServer) {
+    try {
+      await resyncPoliciesByIds(serverId, ids);
+    } catch (err) {
+      console.error(`[user-groups] policy resync server=${serverId} failed:`, err.message);
+    }
+  }
+}
+
 // ── Enterprise-scoped: /api/enterprises/:entId/user-groups ──────────
 
 // POST — Create user group (super_admin only)
@@ -141,6 +175,29 @@ router.delete('/user-groups/:id', async (req, res) => {
     const role = await requireEnterpriseRole(req.user.id, entId, ['root', 'super_admin', 'admin']);
     if (!role) return res.status(403).json({ error: 'admin access or higher required' });
 
+    // Refuse delete when the group still has dependents. CASCADE would
+    // silently wipe rules + ACLs on the agent (some without resync hooks
+    // wired up), and admins typically don't realize a group is in use
+    // until a service breaks. Force them to clear dependents first.
+    const [members, policies, appAcls] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int AS n FROM user_group_members       WHERE user_group_id = $1', [req.params.id]),
+      pool.query('SELECT COUNT(*)::int AS n FROM route_policies           WHERE ingress_group_id = $1', [req.params.id]),
+      pool.query('SELECT COUNT(*)::int AS n FROM application_server_groups WHERE user_group_id = $1', [req.params.id]),
+    ]);
+    const deps = {
+      members:           members.rows[0].n,
+      route_policies:    policies.rows[0].n,
+      application_acls:  appAcls.rows[0].n,
+    };
+    const blocking = Object.entries(deps).filter(([_, n]) => n > 0);
+    if (blocking.length > 0) {
+      const summary = blocking.map(([k, n]) => `${k}=${n}`).join(', ');
+      return res.status(409).json({
+        error: `Group has dependents and cannot be deleted: ${summary}. Remove members + detach from rules/ACLs first.`,
+        dependents: deps,
+      });
+    }
+
     await pool.query('DELETE FROM user_groups WHERE id = $1', [req.params.id]);
     res.json({ deleted: true });
   } catch (err) {
@@ -186,6 +243,12 @@ router.post('/user-groups/:id/members', async (req, res) => {
        ON CONFLICT (user_group_id, user_id) DO UPDATE SET role = $3`,
       [req.params.id, userId, memberRole]
     );
+    // Group composition changed → resync route_policies on every server
+    // that has a policy with ingress_type='group' referencing this
+    // group, so the agent's pf rule picks up the new member's IP (or
+    // drops the removed member's IP). resyncPoliciesByUsers itself does
+    // a diff-skip if nothing actually changed.
+    await resyncPoliciesAfterGroupChange(req.params.id);
     res.status(201).json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -232,6 +295,7 @@ router.delete('/user-groups/:id/members/:userId', async (req, res) => {
       'DELETE FROM user_group_members WHERE user_group_id = $1 AND user_id = $2',
       [req.params.id, req.params.userId]
     );
+    await resyncPoliciesAfterGroupChange(req.params.id);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
