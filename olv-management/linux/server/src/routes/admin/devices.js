@@ -485,20 +485,27 @@ router.delete('/:id', async (req, res) => {
     });
     if (!sigCheck.ok) return res.status(sigCheck.status).json({ error: sigCheck.error });
 
-    // Snapshot route_policies pointing at this device BEFORE the DELETE.
-    // The CASCADE on route_policies.ingress_device_id will wipe the row
-    // entirely, leaving the agent with an orphan pf rule unless we
-    // explicitly remove it by name.
-    const { rows: orphanPolicies } = await pool.query(
-      `SELECT server_id, name FROM route_policies
-        WHERE ingress_type = 'device' AND ingress_device_id = $1`,
-      [req.params.id]
-    );
+    // Snapshot route_policies + application_servers pointing at this
+    // device BEFORE the DELETE. CASCADE on the FK will wipe the rows
+    // entirely, leaving the agent with orphan pf rules unless we
+    // explicitly clean them up by id/name.
+    const [{ rows: orphanPolicies }, { rows: orphanApps }] = await Promise.all([
+      pool.query(
+        `SELECT server_id, name FROM route_policies
+          WHERE ingress_type = 'device' AND ingress_device_id = $1`,
+        [req.params.id]
+      ),
+      pool.query(
+        `SELECT id, server_id FROM application_servers
+          WHERE target_device_id = $1`,
+        [req.params.id]
+      ),
+    ]);
 
     const { rowCount } = await pool.query('DELETE FROM devices WHERE id = $1', [req.params.id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Device not found' });
 
-    // Force-remove the now-orphaned agent rules.
+    // Force-remove orphan policy rules by name.
     if (orphanPolicies.length > 0) {
       const { resyncPoliciesByIds } = require('../../services/policyResync');
       const byServer = new Map();
@@ -512,6 +519,15 @@ router.delete('/:id', async (req, res) => {
           catch (e) { console.warn(`[devices/delete] policy cleanup server=${sid}: ${e.message}`); }
         })
       );
+    }
+
+    // Force-remove orphan app-server firewall rules by groupId.
+    if (orphanApps.length > 0) {
+      const { removeAppServerRules } = require('../../services/appServerFirewall');
+      await Promise.allSettled(orphanApps.map(async a => {
+        try { await removeAppServerRules(a.server_id, a.id); }
+        catch (e) { console.warn(`[devices/delete] app cleanup id=${a.id}: ${e.message}`); }
+      }));
     }
 
     res.json({ deleted: true });

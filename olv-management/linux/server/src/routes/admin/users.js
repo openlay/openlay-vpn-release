@@ -439,6 +439,25 @@ router.delete('/:id', async (req, res) => {
       [req.params.id]
     );
 
+    // Same snapshot pattern for application_servers — the granted-user
+    // pivot row is about to be deleted explicitly, after which
+    // syncAppServersForUsers's intersection query would miss the
+    // affected apps. Capture them now so post-commit cleanup can find
+    // them by id. server_id captured because target_device_id CASCADE
+    // can wipe the app row entirely.
+    const { rows: appServerSnapshot } = await pool.query(
+      `SELECT a.id, a.server_id FROM application_servers a
+        WHERE a.target_user_id = $1
+           OR EXISTS (SELECT 1 FROM application_server_users WHERE app_id = a.id AND user_id = $1)
+           OR EXISTS (
+                SELECT 1 FROM application_server_groups g
+                  JOIN user_group_members m ON m.user_group_id = g.user_group_id
+                 WHERE g.app_id = a.id AND m.user_id = $1
+              )
+           OR EXISTS (SELECT 1 FROM devices d WHERE d.id = a.target_device_id AND d.user_id = $1)`,
+      [req.params.id]
+    );
+
     // ── Transaction ──────────────────────────────────────────────────────
     // Anything that mutates `users` or its dependents goes through this
     // single connection so a failure leaves the DB consistent (admin can
@@ -565,6 +584,24 @@ router.delete('/:id', async (req, res) => {
         }
       })
     );
+
+    // App-server firewall rule cleanup. For each snapshotted app: if
+    // the row still exists, re-sync (will rebuild without this user's
+    // IP); if CASCADE-deleted (target_device_id pointed at a now-gone
+    // device), force-remove the agent rules by groupId.
+    const { syncAppServerFirewall, removeAppServerRules } = require('../../services/appServerFirewall');
+    await Promise.allSettled(appServerSnapshot.map(async snap => {
+      try {
+        const { rows: still } = await pool.query(
+          'SELECT 1 FROM application_servers WHERE id = $1',
+          [snap.id]
+        );
+        if (still.length > 0) await syncAppServerFirewall(snap.id);
+        else await removeAppServerRules(snap.server_id, snap.id);
+      } catch (e) {
+        console.warn(`[users/delete] app-server cleanup id=${snap.id}: ${e.message}`);
+      }
+    }));
 
     res.json({ deleted: true, soft: true });
   } catch (err) {

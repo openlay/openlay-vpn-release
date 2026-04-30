@@ -219,6 +219,15 @@ async function resyncRulesByUsers(serverId, userIds) {
   } catch (err) {
     console.error(`[ruleOrchestrator] policy resync failed:`, err.message);
   }
+  // Application Server firewall rules — same trigger. Each app's
+  // ACCEPT rule set depends on (target user/device peer IP) +
+  // (ACL user peer IPs), so any change to those needs a re-sync.
+  try {
+    const { syncAppServersForUsers } = require('./appServerFirewall');
+    await syncAppServersForUsers(serverId, userIds);
+  } catch (err) {
+    console.error(`[ruleOrchestrator] app-server firewall sync failed:`, err.message);
+  }
 }
 
 async function resyncRulesWhere(serverId, predicate) {

@@ -12,6 +12,7 @@
 const { Router } = require('express');
 const { pool } = require('../db/pool');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { syncAppServerFirewall, removeAppServerRules } = require('../services/appServerFirewall');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -113,6 +114,7 @@ function shapeRow(r, acl) {
     target_user_id: r.target_user_id,
     target_device_id: r.target_device_id,
     port: r.port,
+    protocol: r.protocol,
     enabled: r.enabled,
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -146,20 +148,30 @@ router.post('/', async (req, res) => {
     if (!b.name) return res.status(400).json({ error: 'name is required' });
     if (!b.port) return res.status(400).json({ error: 'port is required' });
     const target = pickTarget(b);
+    const protocol = b.protocol || 'tcp';
+    if (!['tcp', 'udp', 'tcp+udp'].includes(protocol)) {
+      return res.status(400).json({ error: 'protocol must be one of: tcp, udp, tcp+udp' });
+    }
 
     const dbClient = await pool.connect();
     try {
       await dbClient.query('BEGIN');
       const { rows } = await dbClient.query(
         `INSERT INTO application_servers
-           (server_id, name, description, target_type, ip, target_user_id, target_device_id, port, enabled)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+           (server_id, name, description, target_type, ip, target_user_id, target_device_id, port, protocol, enabled)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
         [req.params.serverId, b.name, b.description || null,
          target.target_type, target.ip, target.target_user_id, target.target_device_id,
-         b.port, b.enabled === undefined ? true : !!b.enabled]
+         b.port, protocol, b.enabled === undefined ? true : !!b.enabled]
       );
       await writeAcl(dbClient, rows[0].id, b.user_ids, b.group_ids);
       await dbClient.query('COMMIT');
+      // Push agent firewall rules opening this app's port for granted
+      // users. Best-effort — failure is logged but the DB row stays
+      // (admin can retry by toggling enabled).
+      syncAppServerFirewall(rows[0].id).catch(err =>
+        console.error(`[application-servers] firewall sync app=${rows[0].id} failed:`, err.message)
+      );
       const acl = { users: { [rows[0].id]: b.user_ids || [] }, groups: { [rows[0].id]: b.group_ids || [] } };
       res.status(201).json(shapeRow(rows[0], acl));
     } catch (dbErr) {
@@ -192,9 +204,12 @@ router.put('/:id', async (req, res) => {
     const set = [];
     const vals = [];
     let idx = 1;
-    const cols = ['name', 'description', 'port', 'enabled'];
+    const cols = ['name', 'description', 'port', 'protocol', 'enabled'];
     for (const c of cols) {
       if (req.body[c] === undefined) continue;
+      if (c === 'protocol' && !['tcp', 'udp', 'tcp+udp'].includes(req.body[c])) {
+        return res.status(400).json({ error: 'protocol must be one of: tcp, udp, tcp+udp' });
+      }
       set.push(`${c} = $${idx++}`);
       vals.push(req.body[c]);
     }
@@ -238,6 +253,11 @@ router.put('/:id', async (req, res) => {
         await writeAcl(dbClient, row.id, req.body.user_ids, req.body.group_ids);
       }
       await dbClient.query('COMMIT');
+      // Re-sync agent firewall rules — covers target/port/enabled and
+      // ACL changes (any of which alters the rule set).
+      syncAppServerFirewall(row.id).catch(err =>
+        console.error(`[application-servers] firewall sync app=${row.id} failed:`, err.message)
+      );
       const acl = await loadAcl([row.id]);
       res.json(shapeRow(row, acl));
     } catch (dbErr) {
@@ -263,6 +283,9 @@ router.delete('/:id', async (req, res) => {
       [req.params.id, req.params.serverId]
     );
     if (rowCount === 0) return res.status(404).json({ error: 'Application server not found' });
+    // Tear down agent firewall rules that were opened for this app.
+    removeAppServerRules(parseInt(req.params.serverId), parseInt(req.params.id))
+      .catch(err => console.error(`[application-servers] firewall cleanup app=${req.params.id} failed:`, err.message));
     res.json({ deleted: true });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

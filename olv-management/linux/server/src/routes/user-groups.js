@@ -32,6 +32,15 @@ async function getUserGroupEnterprise(userGroupId) {
  * user intersection) — the membership row may have been deleted
  * already, so user-intersection queries miss it.
  */
+async function resyncAppServersAfterGroupChange(groupId) {
+  try {
+    const { syncAppServersForGroup } = require('../services/appServerFirewall');
+    await syncAppServersForGroup(groupId);
+  } catch (err) {
+    console.error('[user-groups] app-server sync failed:', err.message);
+  }
+}
+
 async function resyncPoliciesAfterGroupChange(groupId) {
   let resyncPoliciesByIds;
   try {
@@ -249,6 +258,7 @@ router.post('/user-groups/:id/members', async (req, res) => {
     // drops the removed member's IP). resyncPoliciesByUsers itself does
     // a diff-skip if nothing actually changed.
     await resyncPoliciesAfterGroupChange(req.params.id);
+    await resyncAppServersAfterGroupChange(req.params.id);
     res.status(201).json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -296,6 +306,7 @@ router.delete('/user-groups/:id/members/:userId', async (req, res) => {
       [req.params.id, req.params.userId]
     );
     await resyncPoliciesAfterGroupChange(req.params.id);
+    await resyncAppServersAfterGroupChange(req.params.id);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

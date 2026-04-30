@@ -499,7 +499,7 @@ router.post('/', async (req, res) => {
         `SELECT a.id, a.name, a.description, a.target_type,
                 a.ip::text          AS ip,
                 a.target_user_id, a.target_device_id,
-                a.port, a.server_id
+                a.port, a.protocol, a.server_id
          FROM application_servers a
          WHERE a.server_id = $1 AND a.enabled = TRUE
          AND (
@@ -558,8 +558,9 @@ router.post('/', async (req, res) => {
           server_id: a.server_id,
           target_type: a.target_type,
           port: a.port,
-          ip: resolvedIp,         // resolved IP — null if unreachable
-          reachable,              // client-side hint
+          protocol: a.protocol,
+          ip: resolvedIp,
+          reachable,
         });
       }
     } catch (asErr) {
