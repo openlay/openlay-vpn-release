@@ -26,12 +26,40 @@ const {
   resolveUserPeerOnServer,
 } = require('./targetResolvers');
 
-const APP_RULE_PRIORITY = 500;   // user-rule band, mid-range
+// Rules pushed under this prefix are managed exclusively by this
+// service — admin must NOT edit/delete them via the firewall UI, since
+// the next sync (CRUD or peer change) would silently overwrite their
+// edits. firewall.js uses this prefix to refuse direct DELETE/PUT on
+// these rules and recommend the Application Server form instead.
+const APP_RULE_PRIORITY = 1500;  // above user band (100-999), into system reserved
 const APP_RULE_LABEL_PREFIX = 'app-server-';
 const APP_RULE_GROUP_PREFIX = 'app-';
 
+// groupId stays numeric+stable — survives admin renames so tear-down
+// matches existing agent rules. Label is human-readable for the
+// firewall list view; rebuilt from app.name on every sync so renames
+// propagate.
 function groupIdFor(appId)  { return `${APP_RULE_GROUP_PREFIX}${appId}`; }
-function labelFor(appId)    { return `${APP_RULE_LABEL_PREFIX}${appId}`; }
+
+/**
+ * Sanitize an app's name for inclusion in a pf label. pf accepts the
+ * label as a quoted string but the firewall list / iOS row treats it
+ * as a single token, so collapse whitespace and strip anything outside
+ * [A-Za-z0-9_-]. Falls back to the id when name has no usable chars.
+ */
+function labelFor(appId, appName) {
+  const safe = (appName || '')
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return safe ? `${APP_RULE_LABEL_PREFIX}${appId}-${safe}`
+              : `${APP_RULE_LABEL_PREFIX}${appId}`;
+}
+
+function isAppManagedGroupId(groupId) {
+  return typeof groupId === 'string' && groupId.startsWith(APP_RULE_GROUP_PREFIX);
+}
 
 /**
  * Resolve the union ACL of an app server: direct user_ids ∪ group
@@ -119,7 +147,7 @@ async function syncAppServerFirewall(appId) {
           protocol: proto,
           dstPort: `${app.port}`,
           target: 'ACCEPT',
-          label: labelFor(appId),
+          label: labelFor(appId, app.name),
           priority: APP_RULE_PRIORITY,
         });
         added++;
@@ -190,4 +218,7 @@ module.exports = {
   removeAppServerRules,
   syncAppServersForUsers,
   syncAppServersForGroup,
+  isAppManagedGroupId,
+  APP_RULE_GROUP_PREFIX,
+  APP_RULE_LABEL_PREFIX,
 };

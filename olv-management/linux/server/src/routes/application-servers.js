@@ -110,7 +110,9 @@ function shapeRow(r, acl) {
     name: r.name,
     description: r.description,
     target_type: r.target_type,
-    ip: r.ip ? String(r.ip) : null,
+    // Strip the /32 (or /128 for IPv6) mask that Postgres' INET text
+    // representation appends — admin/iOS expect a bare host address.
+    ip: r.ip ? String(r.ip).split('/')[0] : null,
     target_user_id: r.target_user_id,
     target_device_id: r.target_device_id,
     port: r.port,

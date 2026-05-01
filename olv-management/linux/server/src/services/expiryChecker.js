@@ -17,6 +17,15 @@ async function checkExpiredPeers() {
          AND pm.is_expired = FALSE`
     );
 
+    // Common case: no peers expire this tick → return fast, zero agent calls.
+    if (expiredPeers.length === 0) return;
+
+    // Track which (server_id → user_id) pairs need a downstream resync.
+    // We batch by server so multiple expiring peers on the same server
+    // collapse into a single resyncRulesByUsers call (which itself
+    // chains to policy + app-server resync, all with diff-skip).
+    const usersToResyncByServer = new Map();
+
     for (const peer of expiredPeers) {
       try {
         const client = new AgentClient(peer.server_id);
@@ -32,10 +41,28 @@ async function checkExpiredPeers() {
         'UPDATE peers_meta SET is_expired = TRUE WHERE id = $1',
         [peer.id]
       );
+
+      if (peer.user_id) {
+        if (!usersToResyncByServer.has(peer.server_id)) {
+          usersToResyncByServer.set(peer.server_id, new Set());
+        }
+        usersToResyncByServer.get(peer.server_id).add(peer.user_id);
+      }
     }
 
-    if (expiredPeers.length > 0) {
-      console.log(`[EXPIRY] Processed ${expiredPeers.length} expired peer(s)`);
+    console.log(`[EXPIRY] Processed ${expiredPeers.length} expired peer(s), resyncing ${usersToResyncByServer.size} server(s)`);
+
+    // Fan out resync per server. Each call chains: firewall →
+    // policies → app-server rules. Diff-skip cheap when nothing
+    // resolves differently (rare here — expiry just dropped peers).
+    // Lazy-require to avoid a load-time cycle through ruleOrchestrator.
+    const { resyncRulesByUsers } = require('./ruleOrchestrator');
+    for (const [serverId, userSet] of usersToResyncByServer) {
+      try {
+        await resyncRulesByUsers(serverId, [...userSet]);
+      } catch (err) {
+        console.error(`[EXPIRY] resync server=${serverId} failed: ${err.message}`);
+      }
     }
   } catch (err) {
     console.error('[EXPIRY] Check failed:', err.message);

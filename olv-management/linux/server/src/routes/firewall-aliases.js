@@ -101,6 +101,16 @@ router.delete('/:aliasId', async (req, res) => {
       [req.params.aliasId, req.params.serverId]
     );
     if (rowCount === 0) return res.status(404).json({ error: 'Alias not found' });
+    // Defensive: even though removeRulesReferencingAlias already
+    // walked & deleted, a stale rule pushed during a concurrent edit
+    // could slip through. resyncRulesByAlias re-checks and rebuilds
+    // any survivors with empty resolution → effectively a clean-up.
+    try {
+      const { resyncRulesByAlias } = require('../services/ruleOrchestrator');
+      await resyncRulesByAlias(parseInt(req.params.serverId), parseInt(req.params.aliasId));
+    } catch (err) {
+      console.error(`[firewall-aliases/DELETE] resync after delete: ${err.message}`);
+    }
     res.json({ deleted: true });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

@@ -152,6 +152,26 @@ router.put('/:subnetId', async (req, res) => {
       await syncAddressesToAgent(req.params.serverId, oldIfaceName);
     }
 
+    // Subnet CIDR change → zones referencing this subnet's CIDR resolve
+    // to a different IP set, so any firewall rule using zone source/dst
+    // is now stale. Trigger a zone-by-zone resync; diff-skip cheap when
+    // nothing changed.
+    if (cidr !== undefined) {
+      try {
+        const { resyncRulesByZone } = require('../services/ruleOrchestrator');
+        const { rows: zones } = await pool.query(
+          'SELECT id FROM firewall_zones WHERE server_id = $1',
+          [req.params.serverId]
+        );
+        for (const z of zones) {
+          await resyncRulesByZone(parseInt(req.params.serverId), z.id).catch(err =>
+            console.error(`[subnets/PUT] zone=${z.id} resync failed: ${err.message}`));
+        }
+      } catch (err) {
+        console.error('[subnets/PUT] zone resync setup failed:', err.message);
+      }
+    }
+
     res.json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Subnet CIDR conflict' });
@@ -173,14 +193,39 @@ router.delete('/:subnetId', async (req, res) => {
     if (toDelete.length === 0) return res.status(404).json({ error: 'Subnet not found' });
     const ifaceName = toDelete[0].interface_name;
 
-    // Block delete if any user is still assigned to this subnet
-    const { rows: assigned } = await pool.query(
-      'SELECT COUNT(*)::int AS count FROM user_server_assignments WHERE subnet_id = $1',
-      [req.params.subnetId]
-    );
-    if (assigned[0].count > 0) {
+    // Refuse delete when ANY rule/peer/assignment still references this
+    // subnet (or its CIDR via routes/policies). CASCADE would silently
+    // wipe agent rules. Caller must clear deps explicitly. Same pattern
+    // as interface delete and group delete refusals.
+    const cidrText = await pool.query('SELECT cidr::text AS c FROM subnets WHERE id=$1', [req.params.subnetId]);
+    const subnetCidr = cidrText.rows[0]?.c;
+    const [users, peers, routesAffecting, policiesAffecting] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int AS n FROM user_server_assignments WHERE subnet_id = $1', [req.params.subnetId]),
+      pool.query('SELECT COUNT(*)::int AS n FROM peers_meta WHERE subnet_id = $1 AND COALESCE(is_expired,FALSE)=FALSE', [req.params.subnetId]),
+      // Routes/policies referencing the CIDR text (string match — they store text not subnet_id).
+      subnetCidr
+        ? pool.query('SELECT COUNT(*)::int AS n FROM routes WHERE server_id=$1 AND (destination::text=$2)', [req.params.serverId, subnetCidr])
+        : Promise.resolve({ rows: [{ n: 0 }] }),
+      subnetCidr
+        ? pool.query(
+            `SELECT COUNT(*)::int AS n FROM route_policies
+              WHERE server_id=$1 AND (src_cidr=$2 OR dst_cidr=$2)`,
+            [req.params.serverId, subnetCidr]
+          )
+        : Promise.resolve({ rows: [{ n: 0 }] }),
+    ]);
+    const deps = {
+      user_assignments: users.rows[0].n,
+      active_peers:     peers.rows[0].n,
+      routes:           routesAffecting.rows[0].n,
+      route_policies:   policiesAffecting.rows[0].n,
+    };
+    const blocking = Object.entries(deps).filter(([_, n]) => n > 0);
+    if (blocking.length > 0) {
+      const summary = blocking.map(([k, n]) => `${k}=${n}`).join(', ');
       return res.status(409).json({
-        error: `Cannot delete subnet: ${assigned[0].count} user(s) are still assigned to it. Please unassign them first.`,
+        error: `Cannot delete subnet "${subnetCidr}": ${summary}. Detach all dependents first (assignments, peers, routes, policies).`,
+        dependents: deps,
       });
     }
 

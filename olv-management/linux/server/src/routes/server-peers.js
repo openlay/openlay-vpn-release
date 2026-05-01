@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT pm.public_key,
               pm.interface_name      AS iface,
-              pm.assigned_ip::text   AS ip,
+              host(pm.assigned_ip)   AS ip,
               pm.alias,
               pm.user_id,
               u.email                AS user_email,

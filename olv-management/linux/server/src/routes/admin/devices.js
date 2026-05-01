@@ -3,6 +3,7 @@ const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { resyncRulesByUsers } = require('../../services/ruleOrchestrator');
 const { verifyAdminSignature } = require('../../services/adminSigning');
+const AgentClient = require('../../services/agentClient');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -402,6 +403,41 @@ router.get('/:id/peers', async (req, res) => {
         ORDER BY pm.created_at DESC`,
       [req.params.id]
     );
+
+    // Enrich each row with the WG-assigned IP from the agent. peers_meta
+    // doesn't track this — the only source of truth is the agent's .conf
+    // (or live wg state), which we surface via `listPeers` per (server,
+    // iface). Group rows so each agent is hit at most once.
+    const groupKey = r => `${r.server_id}|${r.interface_name}`;
+    const groups = new Map();
+    for (const r of rows) {
+      if (!r.server_id || !r.interface_name) continue;
+      const k = groupKey(r);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    }
+
+    // One RPC per group, in parallel — failures don't block the list, the
+    // affected rows just come back with allowed_ips=null.
+    await Promise.allSettled(
+      Array.from(groups.entries()).map(async ([key, rs]) => {
+        const [serverId, iface] = key.split('|');
+        try {
+          const client = new AgentClient(parseInt(serverId, 10));
+          const data = await client.listPeers(iface);
+          const byPubkey = new Map(
+            (data?.peers || []).map(p => [p.publicKey || p.public_key, p])
+          );
+          for (const r of rs) {
+            const agentPeer = byPubkey.get(r.public_key);
+            r.allowed_ips = agentPeer?.allowedIPs || agentPeer?.allowed_ips || null;
+          }
+        } catch (e) {
+          console.warn(`[devices/peers] listPeers failed for server=${serverId} iface=${iface}: ${e.message}`);
+        }
+      })
+    );
+
     res.json({ peers: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -497,7 +497,7 @@ router.post('/', async (req, res) => {
     try {
       const { rows } = await pool.query(
         `SELECT a.id, a.name, a.description, a.target_type,
-                a.ip::text          AS ip,
+                host(a.ip)          AS ip,
                 a.target_user_id, a.target_device_id,
                 a.port, a.protocol, a.server_id
          FROM application_servers a
@@ -527,7 +527,7 @@ router.post('/', async (req, res) => {
           reachable = true;
         } else if (a.target_type === 'user' && a.target_user_id) {
           const { rows: pm } = await pool.query(
-            `SELECT pm.assigned_ip::text AS ip
+            `SELECT host(pm.assigned_ip) AS ip
                FROM peers_meta pm
                LEFT JOIN devices d ON d.id = pm.device_id
               WHERE pm.server_id = $1 AND pm.user_id = $2
@@ -540,7 +540,7 @@ router.post('/', async (req, res) => {
           if (pm[0]) { resolvedIp = pm[0].ip; reachable = true; }
         } else if (a.target_type === 'device' && a.target_device_id) {
           const { rows: pm } = await pool.query(
-            `SELECT assigned_ip::text AS ip
+            `SELECT host(assigned_ip) AS ip
                FROM peers_meta
               WHERE server_id = $1 AND device_id = $2
                 AND assigned_ip IS NOT NULL

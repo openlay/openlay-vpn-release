@@ -93,6 +93,42 @@ function attachWebSocketServer(httpsServer) {
           ws.send(JSON.stringify({ type: 'welcome', id: null, payload: { serverId, auth: 'cert' } }));
           console.log(`[wsServer] Agent identified via cert: serverId=${serverId} agentId=${agentId} remoteIp=${remoteIp}`);
 
+          // Reconcile after every agent (re)connect:
+          //   1. Backfill peers_meta.assigned_ip cache for any peers
+          //      from before migration 047 added the column.
+          //   2. Re-sync every Application Server's firewall rules on
+          //      this server. Cheap thanks to diff-skip; covers
+          //      restarts where pf state was wiped, plus any stale
+          //      rules that didn't sync previously (e.g. when ACL
+          //      users had NULL assigned_ip pre-backfill).
+          //   3. Re-sync every Route Policy similarly.
+          // All fire-and-forget so a slow reconcile doesn't block the
+          // welcome handshake.
+          (async () => {
+            try {
+              const { backfillServerAssignedIps } = require('./targetResolvers');
+              await backfillServerAssignedIps(serverId);
+            } catch (err) {
+              console.error(`[wsServer] backfill on register server=${serverId}: ${err.message}`);
+            }
+            try {
+              const { syncAppServerFirewall } = require('./appServerFirewall');
+              const { rows } = await pool.query(
+                'SELECT id FROM application_servers WHERE server_id = $1 AND enabled = TRUE',
+                [serverId]
+              );
+              for (const r of rows) {
+                await syncAppServerFirewall(r.id).catch(err =>
+                  console.error(`[wsServer] app=${r.id} sync after agent reconnect: ${err.message}`));
+              }
+              if (rows.length > 0) {
+                console.log(`[wsServer] reconciled ${rows.length} app server(s) on server=${serverId}`);
+              }
+            } catch (err) {
+              console.error(`[wsServer] app-server reconcile server=${serverId}: ${err.message}`);
+            }
+          })();
+
           // Start keepalive
           pingTimer = setInterval(() => {
             if (!pongReceived) { ws.terminate(); return; }

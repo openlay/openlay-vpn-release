@@ -121,6 +121,86 @@ router.post('/', async (req, res) => {
     const data = await client.createInterface({
       name, listenPort: actualPort, address, addressV6, mtu: mtu ? Number(mtu) : undefined, dns,
     });
+
+    // Auto-create the matching subnet so the admin doesn't have to bounce
+    // through the Subnets tab right after creating an interface. We derive
+    // the network CIDR from the interface address (e.g. `10.0.0.1/24` → the
+    // subnet `10.0.0.0/24`) and skip on parse failures so a malformed
+    // address never blocks the interface itself.
+    let networkCidr = null;
+    try {
+      const m = String(address).match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+      if (m) {
+        const octets = [m[1], m[2], m[3], m[4]].map(Number);
+        const prefixLen = parseInt(m[5], 10);
+        if (octets.every(o => o <= 255) && prefixLen >= 0 && prefixLen <= 32) {
+          // Compute network address from address & mask. Bit math on
+          // 32-bit unsigned — JS `|` is signed so we use `>>> 0` to clamp.
+          const addrInt = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+          const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
+          const net = (addrInt & mask) >>> 0;
+          networkCidr =
+            `${(net >>> 24) & 0xFF}.${(net >>> 16) & 0xFF}.${(net >>> 8) & 0xFF}.${net & 0xFF}/${prefixLen}`;
+          // INSERT ... ON CONFLICT DO NOTHING — safe re-run if the admin
+          // already created the subnet manually before this call landed.
+          await pool.query(
+            `INSERT INTO subnets (server_id, interface_name, cidr, name)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING`,
+            [req.params.serverId, name, networkCidr, `${name}-default`]
+          );
+        }
+      }
+    } catch (e) {
+      console.warn(`[interfaces/create] auto-subnet insert failed for ${name}: ${e.message}`);
+    }
+
+    // Allow Access Internet — when admin ticked the box on iOS, create a
+    // matching SRC-NAT (masquerade-style) rule so peers in this WG subnet
+    // can reach the public internet through the agent's WAN interface.
+    // We pick the WAN automatically: first physical interface returned by
+    // the agent's listAllInterfaces that's up and not a loopback. Failure
+    // here doesn't unwind the interface creation — the admin can still
+    // build the NAT rule manually from the NAT tab.
+    const allowInternet = req.body.allow_access_internet ?? req.body.allowAccessInternet;
+    if (allowInternet === true && networkCidr) {
+      try {
+        const all = await client.listAllInterfaces();
+        const candidates = (all?.interfaces || all || [])
+          .filter(i => !i.isWireGuard && i.up !== false && i.name && i.name !== 'lo' && i.name !== 'lo0');
+        const wanIface = candidates[0]?.name;
+        if (!wanIface) {
+          console.warn(`[interfaces/create] allow_access_internet=true but no WAN candidate found on server=${req.params.serverId}`);
+        } else {
+          const ruleName = `${name}-internet`;
+          const rule = {
+            name: ruleName,
+            wanIface,
+            srcCIDR: networkCidr,
+            natTo: '',
+            protocol: '',
+            description: `Auto-created with interface ${name} (Allow Access Internet)`,
+            enabled: true,
+          };
+          const agentRule = await client.natAddRule(rule);
+          try {
+            await pool.query(
+              `INSERT INTO nat_rules (server_id, name, wan_iface, src_cidr, nat_to, protocol, description, enabled)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+               ON CONFLICT DO NOTHING`,
+              [req.params.serverId, rule.name, rule.wanIface, rule.srcCIDR, null, null, rule.description, true]
+            );
+          } catch (dbErr) {
+            // DB write failed — roll back the agent rule to avoid drift.
+            try { await client.natRemoveRule(agentRule.id); } catch {}
+            console.warn(`[interfaces/create] NAT db insert failed for ${ruleName}: ${dbErr.message}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[interfaces/create] auto-NAT for ${name} failed: ${e.message}`);
+      }
+    }
+
     res.status(201).json(data);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -132,14 +212,43 @@ router.delete('/:iface', async (req, res) => {
   try {
     if (!requireRoot(req, res)) return;
 
-    // Block delete if any user is still assigned to this interface
-    const { rows: assigned } = await pool.query(
-      'SELECT COUNT(*)::int AS count FROM user_server_assignments WHERE server_id = $1 AND interface_name = $2',
-      [req.params.serverId, req.params.iface]
-    );
-    if (assigned[0].count > 0) {
+    // Refuse delete when ANY rule/peer/policy still references this iface.
+    // CASCADE-deleting silently leaves orphan agent rules + breaks
+    // assumptions in routes/policies/zones. Force admin to clear deps
+    // explicitly. Same pattern as user_groups DELETE refusal.
+    const sid = req.params.serverId;
+    const ifname = req.params.iface;
+    const [users, peers, subnets, routes_, policies, natRules, rdrRules, zoneMembers] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int AS n FROM user_server_assignments WHERE server_id=$1 AND interface_name=$2', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM peers_meta WHERE server_id=$1 AND interface_name=$2 AND COALESCE(is_expired,FALSE)=FALSE', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM subnets WHERE server_id=$1 AND interface_name=$2', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM routes WHERE server_id=$1 AND iface=$2', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM route_policies WHERE server_id=$1 AND (ingress_iface=$2 OR gateway_iface=$2)', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM nat_rules WHERE server_id=$1 AND wan_iface=$2', [sid, ifname]),
+      pool.query('SELECT COUNT(*)::int AS n FROM rdr_rules WHERE server_id=$1 AND wan_iface=$2', [sid, ifname]),
+      pool.query(
+        `SELECT COUNT(*)::int AS n FROM firewall_zone_members
+          WHERE member_type='interface' AND member_value=$2
+            AND zone_id IN (SELECT id FROM firewall_zones WHERE server_id=$1)`,
+        [sid, ifname]
+      ),
+    ]);
+    const deps = {
+      user_assignments: users.rows[0].n,
+      active_peers:     peers.rows[0].n,
+      subnets:          subnets.rows[0].n,
+      routes:           routes_.rows[0].n,
+      route_policies:   policies.rows[0].n,
+      nat_rules:        natRules.rows[0].n,
+      rdr_rules:        rdrRules.rows[0].n,
+      zone_members:     zoneMembers.rows[0].n,
+    };
+    const blocking = Object.entries(deps).filter(([_, n]) => n > 0);
+    if (blocking.length > 0) {
+      const summary = blocking.map(([k, n]) => `${k}=${n}`).join(', ');
       return res.status(409).json({
-        error: `Cannot delete interface: ${assigned[0].count} user(s) are still assigned to it. Please unassign them first.`,
+        error: `Cannot delete interface "${ifname}": ${summary}. Detach all dependents first (assignments, peers, subnets, routes, policies, NAT/rdr rules, zone members).`,
+        dependents: deps,
       });
     }
 
@@ -151,8 +260,7 @@ router.delete('/:iface', async (req, res) => {
     // ghost entries in the admin UI, and (worst) silent re-activation if a
     // future interface is created with the same name. All tables below hold
     // `iface`/`wan_iface` as VARCHAR with no FK, so cascade lives in code.
-    const sid = req.params.serverId;
-    const ifname = req.params.iface;
+    // (sid + ifname captured above in the dependents pre-check.)
     const cascade = await pool.connect();
     try {
       await cascade.query('BEGIN');

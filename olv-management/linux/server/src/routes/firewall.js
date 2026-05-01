@@ -126,7 +126,21 @@ router.post('/:iface/rules', async (req, res) => {
 router.delete('/:iface/rules/:ruleId', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    await getClient(req.params.serverId, req);
+    const client = await getClient(req.params.serverId, req);
+    // Refuse deletion of auto-managed rules (groupId prefix "app-").
+    // These are owned by Application Server feature; admin must edit
+    // via that surface, otherwise the next sync would just re-push.
+    const { isAppManagedGroupId } = require('../services/appServerFirewall');
+    const all = await client.firewallGetAllRules().catch(() => ({ interfaces: {} }));
+    const ifaceRules = all.interfaces?.[req.params.iface] || [];
+    const target = ifaceRules.find(r =>
+      r.groupId === req.params.ruleId || r.id === req.params.ruleId
+    );
+    if (target && isAppManagedGroupId(target.groupId)) {
+      return res.status(403).json({
+        error: `Rule "${target.label || target.groupId}" is managed by an Application Server. Edit via the Applications tab — direct firewall edits get overwritten on next sync.`,
+      });
+    }
     const result = await deleteLogicalRule(parseInt(req.params.serverId), req.params.iface, req.params.ruleId);
     res.json(result);
   } catch (err) {
