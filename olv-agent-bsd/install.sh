@@ -247,6 +247,40 @@ else
 	echo "  service start returned"
 fi
 
+# `service olv-agent restart` returning success does NOT guarantee the
+# daemon stayed alive. The rc.d script can return before the forked
+# daemon dies (port 53 collision with the still-shutting-down old
+# process, stale pidfile race, immediate exit on config error, etc.).
+# Observed prod 2026-05-10: install.sh logged "service start returned"
+# at completion, but `service olv-agent status` 30 minutes later said
+# "not running" — operators only noticed when traffic stopped.
+#
+# Verify daemon is actually alive 5s after the restart returned. If
+# not, surface the agent log so the operator sees the real error
+# instead of a silent failure.
+echo "  verifying daemon is alive..."
+sleep 5
+if service olv-agent status >/dev/null 2>&1; then
+	# Double-check via pidfile + process — `status` only reads the
+	# pidfile, doesn't verify the pid actually exists.
+	PIDFILE=/var/run/olv_agent.pid
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+		echo "  daemon alive (pid $(cat "$PIDFILE"))"
+	else
+		echo "  ERROR: pidfile present but process dead — daemon failed to stay running" >&2
+		echo "  ---- /var/log/olv-agent.log (last 30 lines) ----" >&2
+		tail -30 /var/log/olv-agent.log 2>/dev/null >&2 || echo "  (log file not readable)" >&2
+		exit 1
+	fi
+else
+	echo "  ERROR: daemon failed to stay running after restart" >&2
+	echo "  ---- /var/log/olv-agent.log (last 30 lines) ----" >&2
+	tail -30 /var/log/olv-agent.log 2>/dev/null >&2 || echo "  (log file not readable)" >&2
+	echo "  ---- /var/log/olv-agent-install.log ----" >&2
+	cat /var/log/olv-agent-install.log 2>/dev/null >&2 || echo "  (no install log)" >&2
+	exit 1
+fi
+
 echo "[6/6] done."
 echo
 echo "Config : /usr/local/etc/olv-agent/agent.conf"
