@@ -1,6 +1,6 @@
 {
   "name": "wg-management-server",
-  "version": "2026.04.30.11",
+  "version": "2026.05.08.1",
   "private": true,
   "scripts": {
     "start": "node src/index.js",
