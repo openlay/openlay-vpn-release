@@ -1,39 +1,86 @@
 # Node.js
 node_modules/
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm/
+.node_repl_history
 
 # Environment & secrets
 .env
 .env.*
 !.env.example
+.envrc
 
 # Certificates (generated per deploy)
 certs/
 
-# macOS
+# macOS — match at every depth
 .DS_Store
 ._*
 .Spotlight-V100
 .Trashes
+.AppleDouble
+.LSOverride
 
-# IDE
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# IDE / editor
 .idea/
 .vscode/
 *.swp
 *.swo
-*~
+*.swn
+*.bak
+*.orig
+*.rej
+.fleet/
+.zed/
 
-# OS
-Thumbs.db
-desktop.ini
-
-# Build artifacts
+# Build artifacts (release-repo ships its own pre-built binaries — see
+# olv-agent-bsd/bin/ — so don't ignore those; only catch transients).
 *.tgz
 *.tar.gz
+*.tar
 *.zip
+dist-tmp/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+coverage/
+.nyc_output/
 
 # Logs
 *.log
+logs/
 
-# SSH keys
+# Test/dev artefacts
+*.pid
+*.seed
+
+# SSH keys / private creds
 .ssh/
+id_rsa
+id_ed25519
+*.pem.private
+
+# Python (in case any tooling lands)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# Local junk that's never wanted in this repo
+*.tmp
+*.tmp.*
