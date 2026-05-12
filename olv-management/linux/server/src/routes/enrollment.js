@@ -113,28 +113,54 @@ router.post('/enroll', async (req, res) => {
     }
     const token = authHeader.slice(7);
 
+    // Atomic consume: increment use_count only when it's still < max_uses
+    // (or max_uses=0 meaning unlimited). Combined with WHERE on
+    // revoked/expires_at, this collapses the previous "SELECT → check →
+    // sign cert → UPDATE" sequence into one CAS. If the UPDATE returns
+    // zero rows, the token is exhausted/revoked/expired; reject before
+    // doing any expensive cert work. The old order let a token mint
+    // arbitrary certs if the post-sign UPDATE ever failed, and let two
+    // concurrent enrollments race past the max_uses check.
     const { rows: tokens } = await pool.query(
-      `SELECT * FROM enrollment_tokens
-       WHERE token = $1 AND revoked = FALSE AND expires_at > NOW()`,
+      `UPDATE enrollment_tokens
+          SET use_count = use_count + 1
+        WHERE token = $1
+          AND revoked = FALSE
+          AND expires_at > NOW()
+          AND (max_uses = 0 OR use_count < max_uses)
+        RETURNING *`,
       [token]
     );
     if (tokens.length === 0) {
-      return res.status(401).json({ error: 'Invalid or expired enrollment token' });
+      return res.status(401).json({ error: 'Invalid, expired, or exhausted enrollment token' });
     }
 
     const enrollToken = tokens[0];
-    if (enrollToken.max_uses > 0 && enrollToken.use_count >= enrollToken.max_uses) {
-      return res.status(401).json({ error: 'Enrollment token has reached max uses' });
-    }
 
     // Parse enrollment payload
     const { agentId, hostname, publicUrl, publicIp, apiToken, csr, platform, arch, interfaces } = req.body;
     if (!agentId || !csr) {
+      // Roll back the use_count we just claimed — the request never
+      // turned into a cert.
+      await pool.query(
+        'UPDATE enrollment_tokens SET use_count = GREATEST(use_count - 1, 0) WHERE id = $1',
+        [enrollToken.id]
+      );
       return res.status(400).json({ error: 'agentId and csr are required' });
     }
 
     // Sign CSR
-    const signed = await caManager.signCSR(csr, agentId);
+    let signed;
+    try {
+      signed = await caManager.signCSR(csr, agentId);
+    } catch (err) {
+      // Cert issuance failed — refund the use_count.
+      await pool.query(
+        'UPDATE enrollment_tokens SET use_count = GREATEST(use_count - 1, 0) WHERE id = $1',
+        [enrollToken.id]
+      );
+      throw err;
+    }
 
     // Upsert server record (same logic as agents.js register)
     const description = [platform, arch, publicUrl?.replace('https://', '').split(':')[0]].filter(Boolean).join(' / ');
@@ -177,11 +203,7 @@ router.post('/enroll', async (req, res) => {
       [server.id, agentId, signed.serial, signed.fingerprint, signed.expiresAt.toISOString()]
     );
 
-    // Increment token use count
-    await pool.query(
-      'UPDATE enrollment_tokens SET use_count = use_count + 1 WHERE id = $1',
-      [enrollToken.id]
-    );
+    // use_count was already claimed atomically up-front; nothing to do here.
 
     // Build WebSocket URL
     const wsProtocol = req.protocol === 'https' ? 'wss' : 'ws';

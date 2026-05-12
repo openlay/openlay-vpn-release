@@ -4,7 +4,7 @@
 # Run as root: ./install.sh [options]
 #
 # Installs both services on the same server:
-#   - olv-management (port 3084) — Admin dashboard + WebSocket agent hub
+#   - olv-management (port 3084) — Admin API + WebSocket agent hub
 #   - olv-app-api (port 443) — VPN client API
 #
 # Usage:

@@ -23,8 +23,16 @@ async function verifyPassword(password, hash) {
   const [salt, key] = hash.split(':');
   return new Promise((resolve, reject) => {
     crypto.scrypt(password, salt, 64, (err, derivedKey) => {
-      if (err) reject(err);
-      resolve(derivedKey.toString('hex') === key);
+      if (err) return reject(err);
+      // Constant-time compare. The previous `===` returned as soon as
+      // the first byte differed, leaking timing that lets an attacker
+      // narrow down the stored hash byte-by-byte. The hex/buffer pair
+      // also has to be exactly 64 bytes long; mismatched length means
+      // the hash is corrupt — treat as not-equal without dropping into
+      // timingSafeEqual's panic-on-length-mismatch.
+      const expected = Buffer.from(key, 'hex');
+      if (expected.length !== derivedKey.length) return resolve(false);
+      resolve(crypto.timingSafeEqual(derivedKey, expected));
     });
   });
 }
@@ -60,7 +68,7 @@ async function issueTokenPair(user, deviceId, opts = {}) {
   const accessToken = jwt.sign(
     { sub: user.id, email: user.email, status: user.status, typ: 'access', sid: sessionId },
     config.jwtSecret,
-    { expiresIn: `${config.sessionTtlHours}h` }
+    { expiresIn: `${config.sessionTtlHours}h`, algorithm: 'HS256' }
   );
 
   return {
@@ -80,7 +88,7 @@ async function reissueAccessToken(sessionRow, user) {
   const accessToken = jwt.sign(
     { sub: user.id, email: user.email, status: user.status, typ: 'access', sid: sessionRow.id },
     config.jwtSecret,
-    { expiresIn: `${config.sessionTtlHours}h` }
+    { expiresIn: `${config.sessionTtlHours}h`, algorithm: 'HS256' }
   );
   await pool.query('UPDATE auth_sessions SET last_used_at = NOW() WHERE id = $1', [sessionRow.id]);
   return { accessToken, accessExpiresAt: accessExpires.toISOString() };
@@ -574,10 +582,32 @@ router.put('/reset-password', jwtAuth, async (req, res) => {
     }
 
     const passwordHash = await hashPassword(newPassword);
-    await pool.query(
-      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
-      [passwordHash, userId]
-    );
+    // Update password + invalidate every existing session for this user in
+    // one transaction. Without the session purge, any refresh token (or
+    // mid-life access token, up to sessionTtlHours) the user issued
+    // before the reset stays valid — defeats the point of "reset
+    // password" as a kick mechanism after a credential leak. Deleting
+    // auth_sessions invalidates refresh tokens immediately; access JWTs
+    // become unrefreshable so they expire on their own (≤sessionTtlHours).
+    const tx = await pool.connect();
+    try {
+      await tx.query('BEGIN');
+      await tx.query(
+        'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+        [passwordHash, userId]
+      );
+      const { rowCount: kicked } = await tx.query(
+        'DELETE FROM auth_sessions WHERE user_id = $1',
+        [userId]
+      );
+      await tx.query('COMMIT');
+      console.log(`[auth/reset-password] user=${userId} password reset; revoked ${kicked} session(s)`);
+    } catch (err) {
+      await tx.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      tx.release();
+    }
 
     res.json({ ok: true });
   } catch (err) {

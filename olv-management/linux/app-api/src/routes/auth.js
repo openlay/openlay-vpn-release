@@ -77,13 +77,16 @@ async function verifyClientAppAttest(req, res, { os }) {
   return { skipped: false, ...result, keyId: attestKeyId };
 }
 
-// Password verification (scrypt, matches management server)
+// Password verification (scrypt, matches management server).
+// Constant-time compare — see notes in server/src/routes/auth.js.
 async function verifyPassword(password, hash) {
   const [salt, key] = hash.split(':');
   return new Promise((resolve, reject) => {
     crypto.scrypt(password, salt, 64, (err, derivedKey) => {
-      if (err) reject(err);
-      resolve(derivedKey.toString('hex') === key);
+      if (err) return reject(err);
+      const expected = Buffer.from(key, 'hex');
+      if (expected.length !== derivedKey.length) return resolve(false);
+      resolve(crypto.timingSafeEqual(derivedKey, expected));
     });
   });
 }
@@ -135,7 +138,7 @@ router.post('/apple', rl.apple, async (req, res) => {
     const token = jwt.sign(
       { sub: user.id, email: user.email, status: user.status },
       config.jwtSecret,
-      { expiresIn: '30d' }
+      { expiresIn: '30d', algorithm: 'HS256' }
     );
 
     res.json({
@@ -253,7 +256,7 @@ router.post('/login', rl.login, async (req, res) => {
     const token = jwt.sign(
       { sub: user.id, email: user.email, status: user.status },
       config.jwtSecret,
-      { expiresIn: '30d' }
+      { expiresIn: '30d', algorithm: 'HS256' }
     );
 
     res.json({
@@ -407,7 +410,7 @@ router.post('/device', rl.device, async (req, res) => {
     const token = jwt.sign(
       { sub: user.id, email: user.email, status: user.status },
       config.jwtSecret,
-      { expiresIn: '30d' }
+      { expiresIn: '30d', algorithm: 'HS256' }
     );
 
     res.json({

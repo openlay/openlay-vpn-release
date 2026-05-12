@@ -33,6 +33,16 @@ async function syncAddressesToAgent(serverId, interfaceName) {
   }
 }
 
+// Admin gate: anyone in `root`/`super_admin`/`admin` for this enterprise.
+// Members can read subnets (GET) but mutations (POST/PUT/DELETE) reshape
+// the gateway's address plan + trigger agent setInterfaceAddresses —
+// admin-only is the right scope.
+function requireAdmin(req, res) {
+  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return true;
+  res.status(403).json({ error: 'Admin access required' });
+  return false;
+}
+
 // Verify server is accessible to this user
 async function verifyServerAccess(serverId, req) {
   const isRoot = req.enterpriseRole === 'root';
@@ -60,6 +70,7 @@ router.get('/', async (req, res) => {
 // POST /api/servers/:serverId/subnets
 router.post('/', async (req, res) => {
   try {
+    if (!requireAdmin(req, res)) return;
     if (!(await verifyServerAccess(req.params.serverId, req)))
       return res.status(404).json({ error: 'Server not found' });
     const { cidr, interface_name, name, description } = req.body;
@@ -114,6 +125,7 @@ router.get('/:subnetId', async (req, res) => {
 // PUT /api/servers/:serverId/subnets/:subnetId
 router.put('/:subnetId', async (req, res) => {
   try {
+    if (!requireAdmin(req, res)) return;
     if (!(await verifyServerAccess(req.params.serverId, req)))
       return res.status(404).json({ error: 'Server not found' });
     const { cidr, interface_name, name, description } = req.body;
@@ -182,6 +194,7 @@ router.put('/:subnetId', async (req, res) => {
 // DELETE /api/servers/:serverId/subnets/:subnetId
 router.delete('/:subnetId', async (req, res) => {
   try {
+    if (!requireAdmin(req, res)) return;
     if (!(await verifyServerAccess(req.params.serverId, req)))
       return res.status(404).json({ error: 'Server not found' });
 

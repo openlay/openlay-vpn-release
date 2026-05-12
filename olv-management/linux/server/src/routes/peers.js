@@ -10,6 +10,15 @@ const enterpriseContext = require('../middleware/enterpriseContext');
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
 
+// Admin gate for mutation paths. Reading the peer list is fine for
+// members; creating / deleting / renaming a peer reshapes who has
+// access to the network and must be admin-only.
+function requireAdmin(req, res) {
+  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return true;
+  res.status(403).json({ error: 'Admin access required' });
+  return false;
+}
+
 async function getClientAndServer(serverId, req) {
   const isRoot = req.enterpriseRole === 'root';
   const { rows } = isRoot
@@ -169,33 +178,58 @@ function clientTypeFor(os, isManaged) {
 
 // POST /api/servers/:serverId/interfaces/:iface/peers
 // Supports two modes: "auto" (generate keys) and "import" (provide public key)
+//
+// Transaction model: each POST holds a per-(server, iface) advisory lock
+// so concurrent IP allocations can't both claim the same address. INSERT
+// `peers_meta` is staged in the transaction BEFORE the agent addPeer
+// push; if agent fails the transaction rolls back and the DB never sees
+// a row for a peer that doesn't exist on the wire. If agent succeeds but
+// COMMIT fails (rare — DB hiccup), we compensate by calling removePeer
+// so we never leak a ghost peer in the agent that DB doesn't know about.
 router.post('/', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const iface = req.params.iface;
+  let tx = null;
+  let agentAdded = null; // { iface, publicKey } if we already pushed and may need to compensate
+
   try {
     const { client, server } = await getClientAndServer(req.params.serverId, req);
     const { mode, subnetId: _sid, subnet_id: _sid2, alias, notes, persistentKeepalive, ttlHours, allowedSourceIp, requestedIp } = req.body;
     const subnetId = _sid || _sid2;
-    const iface = req.params.iface;
-
-    // Calculate expiry time
     const expiresAt = ttlHours ? new Date(Date.now() + ttlHours * 3600 * 1000).toISOString() : null;
+
+    tx = await pool.connect();
+    await tx.query('BEGIN');
+    // Serialise IP allocation across concurrent POSTs on the same iface.
+    // Releases automatically on COMMIT/ROLLBACK. Keyed by (server, iface)
+    // so different ifaces (or different servers) don't block each other.
+    await tx.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      [`peers:${req.params.serverId}:${iface}`]
+    );
 
     let publicKey, privateKey, presharedKey, allowedIPs, clientConfig;
 
     if (mode === 'auto') {
-      // Auto-generate keys
       if (!subnetId) {
+        await tx.query('ROLLBACK');
         return res.status(400).json({ error: 'subnetId is required for auto mode' });
       }
-
-      // Get subnet and next IP
-      const { rows: subnets } = await pool.query(
+      const { rows: subnets } = await tx.query(
         'SELECT * FROM subnets WHERE id = $1 AND server_id = $2',
         [subnetId, req.params.serverId]
       );
-      if (subnets.length === 0) return res.status(404).json({ error: 'Subnet not found' });
+      if (subnets.length === 0) {
+        await tx.query('ROLLBACK');
+        return res.status(404).json({ error: 'Subnet not found' });
+      }
       const subnet = subnets[0];
 
-      // Get used IPs
+      // Used IPs come from two places: live agent state + uncommitted
+      // peers_meta rows. The advisory lock keeps OTHER mgmt processes
+      // out, but our own in-flight transaction inserts also need to be
+      // considered if we ever batch-add — currently single POST per
+      // request, so DB query suffices.
       let usedIps = [];
       try {
         const ifaceData = await client.getInterface(iface);
@@ -213,13 +247,14 @@ router.post('/', async (req, res) => {
       const { getNextAvailableIp, isIpInCidr } = require('../services/subnetUtils');
       let nextIp;
       if (requestedIp) {
-        // Validate requested IP is in subnet and not already used
-        const cleanIp = requestedIp.replace(/\/\d+$/, ''); // strip /32 if present
+        const cleanIp = requestedIp.replace(/\/\d+$/, '');
         if (!isIpInCidr(cleanIp, subnet.cidr)) {
+          await tx.query('ROLLBACK');
           return res.status(400).json({ error: `IP ${cleanIp} is not in subnet ${subnet.cidr}` });
         }
         const usedClean = usedIps.map(ip => ip.replace(/\/\d+$/, ''));
         if (usedClean.includes(cleanIp)) {
+          await tx.query('ROLLBACK');
           return res.status(409).json({ error: `IP ${cleanIp} is already in use` });
         }
         nextIp = cleanIp;
@@ -227,17 +262,26 @@ router.post('/', async (req, res) => {
         nextIp = getNextAvailableIp(subnet.cidr, usedIps);
       }
       if (!nextIp) {
+        await tx.query('ROLLBACK');
         return res.status(409).json({ error: 'No available IPs in this subnet' });
       }
 
-      // Generate keys
       const keys = generateKeyPair();
       publicKey = keys.publicKey;
       privateKey = keys.privateKey;
       presharedKey = generatePresharedKey();
       allowedIPs = `${nextIp}/32`;
 
-      // Add peer to agent
+      // 1. INSERT DB first (claim the IP authoritatively under the lock).
+      await tx.query(
+        `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, notes, expires_at, allowed_source_ip)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
+         SET subnet_id = $4, alias = $5, notes = $6, expires_at = $7, allowed_source_ip = $8`,
+        [req.params.serverId, iface, publicKey, subnetId, alias || '', notes || '', expiresAt, allowedSourceIp || null]
+      );
+
+      // 2. Push to agent. If this throws, ROLLBACK below removes the row.
       await client.addPeer(iface, {
         publicKey,
         allowedIPs,
@@ -245,8 +289,9 @@ router.post('/', async (req, res) => {
         persistentKeepalive: persistentKeepalive || 25,
         alias: alias || '',
       });
+      agentAdded = { iface, publicKey };
 
-      // Get server info for client config
+      // 3. Build the client config (cheap reads, no state mutation).
       let serverPublicKey = '';
       let listenPort = '';
       let dns = '';
@@ -254,20 +299,15 @@ router.post('/', async (req, res) => {
         const ifaceInfo = await client.getInterface(iface);
         listenPort = ifaceInfo.listenPort;
         dns = ifaceInfo.dns || '';
-        // Get public key from status
         const statusInfo = await client.getStatus(iface);
         serverPublicKey = statusInfo.public_key || '';
       } catch { /* ignore */ }
 
-      // Build endpoint from server URL, fallback to public_ip
       let serverHost = '';
       try { if (server.url) serverHost = new URL(server.url).hostname; } catch {}
       if (!serverHost) serverHost = server.public_ip || server.hostname || '';
       const endpoint = `${serverHost}:${listenPort}`;
 
-      // Client Interface Address uses the subnet prefix (e.g. 10.0.0.100/24) so the
-      // client can see the whole subnet and reach other peers.
-      // Server-side AllowedIPs stays /32 (only this specific host).
       const subnetPrefix = subnet.cidr.split('/')[1];
       clientConfig = buildClientConfig({
         privateKey,
@@ -280,14 +320,9 @@ router.post('/', async (req, res) => {
         persistentKeepalive: persistentKeepalive || 25,
       });
 
-      // Save metadata
-      await pool.query(
-        `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, notes, expires_at, allowed_source_ip)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
-         SET subnet_id = $4, alias = $5, notes = $6, expires_at = $7, allowed_source_ip = $8`,
-        [req.params.serverId, iface, publicKey, subnetId, alias || '', notes || '', expiresAt, allowedSourceIp || null]
-      );
+      // 4. COMMIT. If this throws, the catch block runs removePeer below.
+      await tx.query('COMMIT');
+      agentAdded = null; // committed — no compensation needed
 
       res.status(201).json({
         publicKey,
@@ -299,17 +334,17 @@ router.post('/', async (req, res) => {
         allowedSourceIp: allowedSourceIp || null,
       });
     } else {
-      // Import mode - user provides public key
+      // Import mode — caller supplies public key.
       const { publicKey: importedKey, presharedKey: importedPsk, allowedIPs: importedAllowedIPs, endpoint } = req.body;
       if (!importedKey) {
+        await tx.query('ROLLBACK');
         return res.status(400).json({ error: 'publicKey is required for import mode' });
       }
 
       let finalAllowedIPs = importedAllowedIPs;
 
-      // If subnetId provided, get next IP
       if (subnetId && !finalAllowedIPs) {
-        const { rows: subnets } = await pool.query(
+        const { rows: subnets } = await tx.query(
           'SELECT * FROM subnets WHERE id = $1 AND server_id = $2',
           [subnetId, req.params.serverId]
         );
@@ -327,7 +362,6 @@ router.post('/', async (req, res) => {
               usedIps.push(...ifaceData.address.split(',').map(a => a.trim()));
             }
           } catch { /* ignore */ }
-
           const { getNextAvailableIp } = require('../services/subnetUtils');
           const nextIp = getNextAvailableIp(subnets[0].cidr, usedIps);
           if (nextIp) finalAllowedIPs = `${nextIp}/32`;
@@ -335,10 +369,20 @@ router.post('/', async (req, res) => {
       }
 
       if (!finalAllowedIPs) {
+        await tx.query('ROLLBACK');
         return res.status(400).json({ error: 'allowedIPs is required (or provide subnetId to auto-assign)' });
       }
 
-      // Add peer to agent
+      // 1. INSERT DB first.
+      await tx.query(
+        `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, notes, expires_at, allowed_source_ip)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
+         SET subnet_id = $4, alias = $5, notes = $6, expires_at = $7, allowed_source_ip = $8`,
+        [req.params.serverId, iface, importedKey, subnetId || null, alias || '', notes || '', expiresAt, allowedSourceIp || null]
+      );
+
+      // 2. Push to agent.
       await client.addPeer(iface, {
         publicKey: importedKey,
         allowedIPs: finalAllowedIPs,
@@ -347,15 +391,11 @@ router.post('/', async (req, res) => {
         persistentKeepalive: persistentKeepalive || 25,
         alias: alias || '',
       });
+      agentAdded = { iface, publicKey: importedKey };
 
-      // Save metadata
-      await pool.query(
-        `INSERT INTO peers_meta (server_id, interface_name, public_key, subnet_id, alias, notes, expires_at, allowed_source_ip)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (server_id, interface_name, public_key) DO UPDATE
-         SET subnet_id = $4, alias = $5, notes = $6, expires_at = $7, allowed_source_ip = $8`,
-        [req.params.serverId, iface, importedKey, subnetId || null, alias || '', notes || '', expiresAt, allowedSourceIp || null]
-      );
+      // 3. COMMIT.
+      await tx.query('COMMIT');
+      agentAdded = null;
 
       res.status(201).json({
         publicKey: importedKey,
@@ -365,13 +405,28 @@ router.post('/', async (req, res) => {
       });
     }
   } catch (err) {
+    if (tx) {
+      try { await tx.query('ROLLBACK'); } catch { /* ignore */ }
+    }
+    // Compensate if we pushed to agent but couldn't commit / threw after.
+    // Best-effort — log on failure but don't override the original error.
+    if (agentAdded) {
+      const { client } = await getClientAndServer(req.params.serverId, req).catch(() => ({ client: null }));
+      if (client) {
+        try { await client.removePeer(agentAdded.iface, agentAdded.publicKey); }
+        catch (rmErr) { console.error('[peers POST] compensation removePeer failed:', rmErr.message); }
+      }
+    }
     res.status(err.status || 500).json({ error: err.message });
+  } finally {
+    if (tx) tx.release();
   }
 });
 
 // DELETE /api/servers/:serverId/interfaces/:iface/peers/:pubkey
 router.delete('/:pubkey', async (req, res) => {
   try {
+    if (!requireAdmin(req, res)) return;
     const { client } = await getClientAndServer(req.params.serverId, req);
     const pubkey = decodeURIComponent(req.params.pubkey);
 

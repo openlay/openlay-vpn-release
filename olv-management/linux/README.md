@@ -34,7 +34,7 @@ Press Enter to accept defaults. The installer handles everything automatically:
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `olv-management` | 3084 | Admin dashboard + API + WebSocket agent hub |
+| `olv-management` | 3084 | Admin API + WebSocket agent hub |
 | `olv-app-api` | 443 | VPN client API (iOS/macOS/Windows) |
 
 Both services share one PostgreSQL database and run under the `olv-management` user.
@@ -48,10 +48,12 @@ sudo systemctl status olv-management olv-app-api
 # View logs
 sudo journalctl -u olv-management -f
 sudo journalctl -u olv-app-api -f
-
-# Open dashboard
-https://<your-domain>:3084
 ```
+
+All admin actions happen from the OpenLay iOS app — [join the
+TestFlight beta](https://testflight.apple.com/join/nSmM9h5d). The
+install script ends by printing a one-shot QR; scan it from the app to
+enroll the first root user.
 
 ## Update
 
@@ -109,10 +111,9 @@ sudo systemctl restart olv-app-api
 ```
 /home/olv-management/
 ├── wireguard-management/
-│   ├── server/          # Management API
-│   ├── client/dist/     # Admin dashboard (React)
+│   ├── server/          # Management API + WebSocket agent hub
 │   ├── certs/           # TLS certificates
-│   └── .env             # Configuration
+│   └── .env             # Configuration (includes ROOT_SETUP_TOKEN)
 └── app-api/
     ├── src/             # VPN client API
     ├── certs/           # TLS certificates

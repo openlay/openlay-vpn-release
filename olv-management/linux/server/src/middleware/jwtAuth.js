@@ -57,7 +57,10 @@ async function jwtAuth(req, res, next) {
   const token = header.slice(7);
   let payload;
   try {
-    payload = jwt.verify(token, config.jwtSecret);
+    // Pin algorithm. jsonwebtoken v9 defaults to a sane allow-list but
+    // explicit is safer against algorithm-confusion / `alg: none` if the
+    // library ever regresses.
+    payload = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }

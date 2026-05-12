@@ -114,6 +114,13 @@ INSERT INTO root_users (user_id)
 SELECT id FROM users WHERE username = '${ROOT_USERNAME}'
 ON CONFLICT DO NOTHING;
 
+-- Revoke any pre-existing sessions so a lost/compromised device that holds
+-- an old access JWT can't keep using it after the password reset.
+UPDATE auth_sessions
+   SET revoked_at = NOW()
+ WHERE user_id = (SELECT id FROM users WHERE username = '${ROOT_USERNAME}')
+   AND revoked_at IS NULL;
+
 COMMIT;
 SQL
 
@@ -127,7 +134,7 @@ if [ $? -eq 0 ]; then
   echo "  Email:    ${ROOT_EMAIL}"
   echo "  Role:     root (system-wide)"
   echo ""
-  echo "  Login via iOS management app or web dashboard."
+  echo "  Login via the OpenLay iOS management app."
   echo "  After login, create your first enterprise."
   echo ""
 else
