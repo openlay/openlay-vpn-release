@@ -223,12 +223,11 @@ mkdir -p "$MGMT_DIR" "$APP_API_DIR"
 
 # Management server
 cp -r "$SCRIPT_DIR/server" "$MGMT_DIR/"
-if [ -d "$SCRIPT_DIR/client/dist" ]; then
-  mkdir -p "$MGMT_DIR/client"
-  cp -r "$SCRIPT_DIR/client/dist" "$MGMT_DIR/client/"
-fi
 cp "$SCRIPT_DIR/package.json" "$MGMT_DIR/" 2>/dev/null || true
 cp "$SCRIPT_DIR/package-lock.json" "$MGMT_DIR/" 2>/dev/null || true
+# Drop any prior install's admin UI tree — the web dashboard was retired
+# 2026-05-12, iOS app is now the only admin surface.
+rm -rf "$MGMT_DIR/client"
 info "  Management server: ${MGMT_DIR}"
 
 # App API

@@ -25,6 +25,7 @@ const {
   resolveAppServerTarget,
   resolveUserPeerOnServer,
 } = require('./targetResolvers');
+const { withServerLock } = require('./serverLock');
 
 // Rules pushed under this prefix are managed exclusively by this
 // service — admin must NOT edit/delete them via the firewall UI, since
@@ -82,6 +83,10 @@ async function resolveAclUsers(appId) {
  * Remove every agent firewall rule belonging to this app server. Walks
  * all ifaces returned by the agent so we don't leave orphans behind.
  * Idempotent — safe to call when nothing exists.
+ *
+ * Uses replaceGroup(iface, groupId, []) per iface so each (iface,
+ * groupId) tear-down is atomic at the agent. A WS timeout either commits
+ * the empty-state or leaves the prior rules — never a partial state.
  */
 async function removeAppServerRules(serverId, appId) {
   const client = new AgentClient(serverId);
@@ -90,7 +95,7 @@ async function removeAppServerRules(serverId, appId) {
   let removed = 0;
   for (const iface of Object.keys(all.interfaces || {})) {
     try {
-      const r = await client.firewallRemoveGroup(iface, groupId);
+      const r = await client.firewallReplaceGroup(iface, groupId, []);
       removed += r?.removed || 0;
     } catch (err) {
       console.error(`[appServerFirewall] remove ${groupId} on ${iface} failed:`, err.message);
@@ -102,6 +107,11 @@ async function removeAppServerRules(serverId, appId) {
 /**
  * Sync the firewall rule set for one app server. Idempotent. Tears down
  * the existing groupId and rebuilds based on current DB + peer state.
+ *
+ * Wrapped in withServerLock so the remove→add window can't interleave with
+ * another sync of the same server (which would either lose this sync's
+ * adds — last-write-wins on a stable groupId — or, worse, leave a partial
+ * rule set if the racing sync's remove fires between this sync's adds).
  */
 async function syncAppServerFirewall(appId) {
   const { rows } = await pool.query(
@@ -110,50 +120,81 @@ async function syncAppServerFirewall(appId) {
   );
   const app = rows[0];
   if (!app) return { removed: 0, added: 0, reason: 'not-found' };
+  return withServerLock(app.server_id, () => syncAppServerFirewallLocked(app, appId));
+}
 
-  const removed = await removeAppServerRules(app.server_id, appId);
-
-  if (!app.enabled) return { removed, added: 0, reason: 'disabled' };
-
-  // Resolve target → concrete IP. If target is user/device and offline,
-  // skip — rules will get pushed once the target peer comes online via
-  // the resyncRulesByUsers chain.
-  const target = await resolveAppServerTarget(app, app.server_id);
-  if (!target.ip) return { removed, added: 0, reason: 'target-offline' };
-
-  // Resolve ACL → list of user_ids. Empty ACL = no rules (admin
-  // explicitly granted nobody, so nobody should be allowed in).
-  const aclUserIds = await resolveAclUsers(appId);
-  if (aclUserIds.length === 0) return { removed, added: 0, reason: 'empty-acl' };
-
-  // protocol may be 'tcp', 'udp', or 'tcp+udp'. Push one physical rule
-  // per (granted user, protocol) — cross-product. All share the
-  // app's groupId so a future tear-down hits everything.
-  const protos = (app.protocol || 'tcp') === 'tcp+udp' ? ['tcp', 'udp'] : [app.protocol || 'tcp'];
-
-  // Map each granted user to (iface, ip). Multiple users may sit on the
-  // same iface; cross-iface is supported (one rule per (srcIP, iface)).
+async function syncAppServerFirewallLocked(app, appId) {
+  const groupId = groupIdFor(appId);
   const client = new AgentClient(app.server_id);
-  let added = 0;
+
+  // Snapshot the agent's current interface set so we can tear down rules
+  // on ifaces that no longer hold this app (user migrated to a different
+  // iface, agent gained a new wg interface, etc.).
+  const all = await client.firewallListAllRules().catch(() => ({ interfaces: {} }));
+  const knownIfaces = new Set(Object.keys(all.interfaces || {}));
+
+  // Early-exit cases: no rules should exist anywhere for this app.
+  // Atomically clear every iface in one replaceGroup-with-empty per iface.
+  const teardownAll = async (reason) => {
+    let removed = 0;
+    for (const iface of knownIfaces) {
+      try {
+        const r = await client.firewallReplaceGroup(iface, groupId, []);
+        removed += r?.removed || 0;
+      } catch (err) {
+        console.error(`[appServerFirewall] teardown ${groupId} on ${iface} failed:`, err.message);
+      }
+    }
+    return { removed, added: 0, reason };
+  };
+
+  if (!app.enabled) return teardownAll('disabled');
+
+  const target = await resolveAppServerTarget(app, app.server_id);
+  if (!target.ip) return teardownAll('target-offline');
+
+  const aclUserIds = await resolveAclUsers(appId);
+  if (aclUserIds.length === 0) return teardownAll('empty-acl');
+
+  // protocol may be 'tcp', 'udp', or 'tcp+udp'. One physical rule per
+  // (granted user, protocol), grouped by the user's peer iface so each
+  // iface's replaceGroup is atomic.
+  const protos = (app.protocol || 'tcp') === 'tcp+udp' ? ['tcp', 'udp'] : [app.protocol || 'tcp'];
+  const label = labelFor(appId, app.name);
+  const rulesByIface = new Map(); // iface → Rule[]
+
   for (const uid of aclUserIds) {
     const peer = await resolveUserPeerOnServer(app.server_id, uid);
-    if (!peer) continue;     // user offline — skip
+    if (!peer) continue;
+    if (!rulesByIface.has(peer.iface)) rulesByIface.set(peer.iface, []);
     for (const proto of protos) {
-      try {
-        await client.firewallAddRule(peer.iface, {
-          groupId: groupIdFor(appId),
-          srcIP: `${peer.ip}/32`,
-          dstIP: `${target.ip}/32`,
-          protocol: proto,
-          dstPort: `${app.port}`,
-          target: 'ACCEPT',
-          label: labelFor(appId, app.name),
-          priority: APP_RULE_PRIORITY,
-        });
-        added++;
-      } catch (err) {
-        console.error(`[appServerFirewall] add rule for app=${appId} src=${peer.ip} proto=${proto} failed:`, err.message);
-      }
+      rulesByIface.get(peer.iface).push({
+        groupId,
+        srcIP: `${peer.ip}/32`,
+        dstIP: `${target.ip}/32`,
+        protocol: proto,
+        dstPort: `${app.port}`,
+        target: 'ACCEPT',
+        label,
+        priority: APP_RULE_PRIORITY,
+      });
+    }
+  }
+
+  // Touch every iface that EITHER had old rules OR has new ones. The
+  // union covers two cases: a user moving from iface A → B (replaceGroup
+  // on A with [] clears A; on B with the new rule adds it).
+  const touchIfaces = new Set([...knownIfaces, ...rulesByIface.keys()]);
+  let removed = 0;
+  let added = 0;
+  for (const iface of touchIfaces) {
+    const rules = rulesByIface.get(iface) || [];
+    try {
+      const r = await client.firewallReplaceGroup(iface, groupId, rules);
+      removed += r?.removed || 0;
+      added += r?.added || 0;
+    } catch (err) {
+      console.error(`[appServerFirewall] replaceGroup ${groupId} on ${iface} failed:`, err.message);
     }
   }
   return { removed, added, reason: 'synced' };

@@ -20,6 +20,7 @@
 const { pool } = require('../db/pool');
 const AgentClient = require('./agentClient');
 const { resolvePolicyIngress } = require('./targetResolvers');
+const { withServerLock } = require('./serverLock');
 
 function buildAgentPayload(p, resolved) {
   return {
@@ -44,7 +45,10 @@ async function resyncPoliciesByIds(serverId, policyIds = [], removedNames = []) 
   const ids = (policyIds || []).filter(Boolean);
   const removed = (removedNames || []).filter(Boolean);
   if (ids.length === 0 && removed.length === 0) return { resynced: 0, skipped: 0, removed: 0 };
+  return withServerLock(serverId, () => resyncPoliciesByIdsLocked(serverId, ids, removed));
+}
 
+async function resyncPoliciesByIdsLocked(serverId, ids, removed) {
   const client = new AgentClient(serverId);
   const list = await client.routerListPolicies().catch(() => ({ policies: [] }));
   const byName = new Map((list.policies || []).map(p => [p.name, p]));

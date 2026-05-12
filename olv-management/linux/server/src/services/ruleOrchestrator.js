@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const AgentClient = require('./agentClient');
 const { resolveSide } = require('./ruleResolver');
 const { pool } = require('../db/pool');
+const { withServerLock } = require('./serverLock');
 
 function generateGroupId() {
   return crypto.randomUUID();
@@ -28,8 +29,19 @@ function normalizePriority(value) {
 /**
  * Create a logical rule on the agent — resolve zone/alias/user refs to IPs,
  * expand into N physical iptables rules sharing a groupId, return one logical rule.
+ *
+ * If `body.groupId` is provided, it is reused instead of generating a fresh
+ * UUID. The resync path passes the existing groupId so a rebuild keeps the
+ * rule's identity stable across cycles — a defence in depth against the
+ * accumulation bug fixed by `withServerLock` (if the lock ever fails, the
+ * next resync's `removeGroup(stableId)` still finds and removes the prior
+ * rebuild rather than orphaning it under a new UUID).
  */
 async function createLogicalRule(serverId, iface, body) {
+  return withServerLock(serverId, () => createLogicalRuleLocked(serverId, iface, body));
+}
+
+async function createLogicalRuleLocked(serverId, iface, body) {
   // iOS APIClient encodes with convertToSnakeCase, so accept both spellings.
   const {
     srcIP, dstIP, src_ip, dst_ip,
@@ -37,6 +49,7 @@ async function createLogicalRule(serverId, iface, body) {
     srcAliasId, dstAliasId, src_alias_id, dst_alias_id,
     srcUserId, dstUserId, src_user_id, dst_user_id,
     priority,
+    groupId: groupIdOverride,
     ...rest
   } = body;
   const side = {
@@ -63,7 +76,7 @@ async function createLogicalRule(serverId, iface, body) {
     throw new Error('Destination zone/alias/user resolved to no IPs');
   }
 
-  const groupId = generateGroupId();
+  const groupId = groupIdOverride || generateGroupId();
   const metadata = { groupId, priority: normalizedPriority };
   if (side.srcZoneId != null) metadata.srcZoneId = side.srcZoneId;
   if (side.dstZoneId != null) metadata.dstZoneId = side.dstZoneId;
@@ -78,17 +91,24 @@ async function createLogicalRule(serverId, iface, body) {
   if (wanExcludes.srcExcludeCIDRs) metadata.srcExcludeCIDRs = wanExcludes.srcExcludeCIDRs;
   if (wanExcludes.dstExcludeCIDRs) metadata.dstExcludeCIDRs = wanExcludes.dstExcludeCIDRs;
 
-  const client = new AgentClient(serverId);
-  const physical = [];
+  // Build the full physical-rule list, then push it in a single atomic
+  // replaceGroup RPC. Previously this was `firewallAddRule × N` (and for
+  // resync, `removeGroup` first) — a network timeout between commands
+  // could land remove without add, dropping rules permanently. The
+  // single-RPC path commits-or-rolls-back as one unit.
+  const rules = [];
   for (const s of srcIPs) {
     for (const d of dstIPs) {
       const rule = { ...rest, ...metadata };
       if (s != null) rule.srcIP = s;
       if (d != null) rule.dstIP = d;
-      const created = await client.firewallAddRule(iface, rule);
-      physical.push(created);
+      rules.push(rule);
     }
   }
+
+  const client = new AgentClient(serverId);
+  const result = await client.firewallReplaceGroup(iface, groupId, rules);
+  const physical = result?.rules || rules;
 
   return buildLogicalRule(physical, { groupId, ...metadata, iface, ...rest });
 }
@@ -189,14 +209,20 @@ function buildLogicalRule(members, base) {
  * dstZoneId matches. Used when zone membership changes.
  */
 async function resyncRulesByZone(serverId, zoneId) {
-  await resyncRulesWhere(serverId, r => r.srcZoneId == zoneId || r.dstZoneId == zoneId);
+  await withServerLock(serverId, () =>
+    resyncRulesWhere(serverId, r => r.srcZoneId == zoneId || r.dstZoneId == zoneId));
 }
 
 async function resyncRulesByAlias(serverId, aliasId) {
-  await resyncRulesWhere(serverId, r => r.srcAliasId == aliasId || r.dstAliasId == aliasId);
+  await withServerLock(serverId, () =>
+    resyncRulesWhere(serverId, r => r.srcAliasId == aliasId || r.dstAliasId == aliasId));
 }
 
 async function resyncRulesByUsers(serverId, userIds) {
+  return withServerLock(serverId, () => resyncRulesByUsersLocked(serverId, userIds));
+}
+
+async function resyncRulesByUsersLocked(serverId, userIds) {
   const set = new Set(userIds.filter(Boolean));
   if (set.size === 0) return;
   await resyncRulesWhere(serverId, r => set.has(r.srcUserId) || set.has(r.dstUserId));
@@ -207,6 +233,8 @@ async function resyncRulesByUsers(serverId, userIds) {
     [serverId, 'vpn-peers']
   );
   if (rows.length > 0) {
+    // Re-entrant: already inside this server's lock; withServerLock in
+    // resyncRulesByZone is a no-op via AsyncLocalStorage.
     await resyncRulesByZone(serverId, rows[0].id);
   }
   // Route policies share the same user→IP dependency as firewall rules,
@@ -324,8 +352,12 @@ async function resyncRulesWhere(serverId, predicate) {
       }
       if (same) continue;
 
-      await client.firewallRemoveGroup(iface, rule.groupId);
-      await createLogicalRule(serverId, iface, body);
+      // Reuse the existing groupId so the rule's identity stays stable
+      // across rebuilds. createLogicalRule sends a single atomic
+      // replaceGroup RPC — the agent swaps in the new physical rules
+      // under Store.mu, so a WS timeout never leaves "removed but not
+      // re-added" partial state.
+      await createLogicalRule(serverId, iface, { ...body, groupId: rule.groupId });
     } catch (err) {
       console.error(`[ruleOrchestrator] resync failed for group ${rule.groupId}:`, err.message);
     }

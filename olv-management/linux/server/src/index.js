@@ -85,14 +85,6 @@ app.post('/api/test-results', enterpriseContext, async (req, res) => {
   }
 });
 
-// Serve frontend in production
-const clientDist = path.join(__dirname, '../../client/dist');
-app.use(express.static(clientDist));
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  res.sendFile(path.join(clientDist, 'index.html'));
-});
-
 app.use(errorHandler);
 
 async function start() {
@@ -113,6 +105,10 @@ async function start() {
 
   // Start peer expiry checker (every 60 seconds)
   startExpiryChecker(60000);
+
+  // Periodic reconcile of agent firewall state against DB source of
+  // truth. Default 30 min; tunable via RECONCILE_INTERVAL_MS (0 = off).
+  require('./services/reconcileLoop').start();
 
   // Load TLS certs for HTTPS
   const certDir = config.tlsCertDir;

@@ -47,6 +47,7 @@
 const { pool } = require('../db/pool');
 const AgentClient = require('./agentClient');
 const { resolveDevicePeerOnServer } = require('./targetResolvers');
+const { withServerLock } = require('./serverLock');
 
 const POLICY_NAME_PREFIX = 'exit-';
 // Sit just below the 1000+ "auto rule" band so route-to wins over the
@@ -241,13 +242,15 @@ async function syncConsumerPolicy(serverId, deviceId) {
  * Idempotent — safe to call regardless of prior state.
  */
 async function syncDeviceExitNodeOnServer(serverId, deviceId) {
-  // Order matters: install allowedIPs BEFORE consumer policy so that the
-  // first packet flowing through PBR isn't dropped by WG cryptokey
-  // routing because the exit peer doesn't yet accept 0/0. (For consumer
-  // role we tear down first and rebuild last; that path is fine.)
-  const exit = await syncExitPeerAllowedIPs(serverId, deviceId);
-  const consumer = await syncConsumerPolicy(serverId, deviceId);
-  return { consumer, exit };
+  return withServerLock(serverId, async () => {
+    // Order matters: install allowedIPs BEFORE consumer policy so that the
+    // first packet flowing through PBR isn't dropped by WG cryptokey
+    // routing because the exit peer doesn't yet accept 0/0. (For consumer
+    // role we tear down first and rebuild last; that path is fine.)
+    const exit = await syncExitPeerAllowedIPs(serverId, deviceId);
+    const consumer = await syncConsumerPolicy(serverId, deviceId);
+    return { consumer, exit };
+  });
 }
 
 /**

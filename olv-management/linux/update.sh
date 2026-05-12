@@ -61,13 +61,8 @@ cp -r "$SCRIPT_DIR/server/src" "$MGMT_DIR/server/src"
 cp "$SCRIPT_DIR/server/package.json" "$MGMT_DIR/server/" 2>/dev/null || true
 cp "$SCRIPT_DIR/server/package-lock.json" "$MGMT_DIR/server/" 2>/dev/null || true
 
-# Client dashboard
-if [ -d "$SCRIPT_DIR/client/dist" ]; then
-  rm -rf "$MGMT_DIR/client/dist"
-  mkdir -p "$MGMT_DIR/client"
-  cp -r "$SCRIPT_DIR/client/dist" "$MGMT_DIR/client/"
-  info "  Dashboard updated"
-fi
+# Drop any prior install's admin UI tree — retired 2026-05-12.
+rm -rf "$MGMT_DIR/client"
 
 # App API
 rm -rf "$APP_API_DIR/src"

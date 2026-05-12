@@ -2,12 +2,9 @@
   "name": "wireguard-management",
   "version": "1.0.0",
   "private": true,
-  "workspaces": ["server", "client"],
+  "workspaces": ["server"],
   "scripts": {
-    "dev": "npm run dev:server & npm run dev:client",
-    "dev:server": "cd server && npm run dev",
-    "dev:client": "cd client && npm run dev",
-    "build": "cd client && npm run build",
+    "dev": "cd server && npm run dev",
     "start": "cd server && npm start"
   }
 }

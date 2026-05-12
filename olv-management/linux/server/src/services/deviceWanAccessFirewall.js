@@ -27,6 +27,7 @@
 const { pool } = require('../db/pool');
 const AgentClient = require('./agentClient');
 const { resolveDevicePeerOnServer } = require('./targetResolvers');
+const { withServerLock } = require('./serverLock');
 
 const WAN_RULE_PRIORITY = 1400;
 const WAN_RULE_GROUP_PREFIX = 'wan-access-';
@@ -41,7 +42,8 @@ function isWanAccessManagedGroupId(groupId) {
 
 /**
  * Remove every wan-access rule for this device on this server (across
- * all ifaces). Idempotent.
+ * all ifaces). Idempotent. Uses replaceGroup(iface, groupId, []) per
+ * iface so each tear-down is atomic at the agent.
  */
 async function removeDeviceWanAccessRules(serverId, deviceId) {
   const client = new AgentClient(serverId);
@@ -50,7 +52,7 @@ async function removeDeviceWanAccessRules(serverId, deviceId) {
   let removed = 0;
   for (const iface of Object.keys(all.interfaces || {})) {
     try {
-      const r = await client.firewallRemoveGroup(iface, groupId);
+      const r = await client.firewallReplaceGroup(iface, groupId, []);
       removed += r?.removed || 0;
     } catch (err) {
       console.error(`[deviceWanAccessFirewall] remove ${groupId} on ${iface} failed:`, err.message);
@@ -64,6 +66,10 @@ async function removeDeviceWanAccessRules(serverId, deviceId) {
  * server. Idempotent — safe to call regardless of current state.
  */
 async function syncDeviceWanAccessOnServer(serverId, deviceId) {
+  return withServerLock(serverId, () => syncDeviceWanAccessOnServerLocked(serverId, deviceId));
+}
+
+async function syncDeviceWanAccessOnServerLocked(serverId, deviceId) {
   const { rows } = await pool.query(
     `SELECT d.status, d.profile_id, p.allow_wan_access
        FROM devices d
@@ -72,51 +78,67 @@ async function syncDeviceWanAccessOnServer(serverId, deviceId) {
     [deviceId]
   );
   const dev = rows[0];
+  const groupId = groupIdFor(deviceId);
 
-  // Always tear down first — keeps state convergent if status/profile flipped.
-  await removeDeviceWanAccessRules(serverId, deviceId);
-
-  if (!dev) return { removed: 1, added: 0, reason: 'device-not-found' };
-  if (dev.status !== 'enabled') return { added: 0, reason: 'device-not-enabled' };
-  if (!dev.profile_id) return { added: 0, reason: 'no-profile' };
-  if (!dev.allow_wan_access) return { added: 0, reason: 'wan-access-off' };
-
-  const peer = await resolveDevicePeerOnServer(serverId, deviceId);
-  if (!peer) return { added: 0, reason: 'peer-offline' };
-
-  // Look up the built-in `wan` zone for this server.
-  const { rows: zoneRows } = await pool.query(
-    `SELECT id FROM firewall_zones WHERE server_id = $1 AND name = 'wan'`,
-    [serverId]
-  );
-  if (zoneRows.length === 0) return { added: 0, reason: 'no-wan-zone' };
-  const wanZoneId = zoneRows[0].id;
-
-  // VPN subnets on this server become the "everywhere except VPN" exclude
-  // list — same semantic as ruleOrchestrator.collectWanExcludes.
-  const { rows: subs } = await pool.query(
-    'SELECT DISTINCT cidr FROM subnets WHERE server_id = $1',
-    [serverId]
-  );
-  const dstExcludeCIDRs = [...new Set(subs.map(r => r.cidr).filter(Boolean))];
-
-  const client = new AgentClient(serverId);
-  try {
-    await client.firewallAddRule(peer.iface, {
-      groupId: groupIdFor(deviceId),
-      srcIP: `${peer.ip}/32`,
-      dstIP: '0.0.0.0/0',
-      dstZoneId: wanZoneId,
-      dstExcludeCIDRs,
-      target: 'ACCEPT',
-      label: labelFor(deviceId),
-      priority: WAN_RULE_PRIORITY,
-    });
-    return { added: 1, reason: 'synced' };
-  } catch (err) {
-    console.error(`[deviceWanAccessFirewall] add rule device=${deviceId} server=${serverId}: ${err.message}`);
-    return { added: 0, reason: 'push-failed', error: err.message };
+  // Decide whether ANY rule should exist; if not, the only thing to do
+  // is clear every iface that currently has one (handled below).
+  let target = null;
+  if (dev && dev.status === 'enabled' && dev.profile_id && dev.allow_wan_access) {
+    const peer = await resolveDevicePeerOnServer(serverId, deviceId);
+    if (peer) {
+      const { rows: zoneRows } = await pool.query(
+        `SELECT id FROM firewall_zones WHERE server_id = $1 AND name = 'wan'`,
+        [serverId]
+      );
+      if (zoneRows.length > 0) {
+        const { rows: subs } = await pool.query(
+          'SELECT DISTINCT cidr FROM subnets WHERE server_id = $1',
+          [serverId]
+        );
+        target = {
+          iface: peer.iface,
+          rule: {
+            groupId,
+            srcIP: `${peer.ip}/32`,
+            dstIP: '0.0.0.0/0',
+            dstZoneId: zoneRows[0].id,
+            dstExcludeCIDRs: [...new Set(subs.map(r => r.cidr).filter(Boolean))],
+            target: 'ACCEPT',
+            label: labelFor(deviceId),
+            priority: WAN_RULE_PRIORITY,
+          },
+        };
+      }
+    }
   }
+
+  // One replaceGroup per touched iface — covers both clearing stale
+  // ifaces and installing the new rule, atomically each.
+  const client = new AgentClient(serverId);
+  const all = await client.firewallListAllRules().catch(() => ({ interfaces: {} }));
+  const knownIfaces = new Set(Object.keys(all.interfaces || {}));
+  const touchIfaces = new Set(knownIfaces);
+  if (target) touchIfaces.add(target.iface);
+
+  let removed = 0;
+  let added = 0;
+  for (const iface of touchIfaces) {
+    const rules = target && iface === target.iface ? [target.rule] : [];
+    try {
+      const r = await client.firewallReplaceGroup(iface, groupId, rules);
+      removed += r?.removed || 0;
+      added += r?.added || 0;
+    } catch (err) {
+      console.error(`[deviceWanAccessFirewall] replaceGroup ${groupId} on ${iface} failed:`, err.message);
+    }
+  }
+
+  if (!dev) return { removed, added, reason: 'device-not-found' };
+  if (dev.status !== 'enabled') return { removed, added, reason: 'device-not-enabled' };
+  if (!dev.profile_id) return { removed, added, reason: 'no-profile' };
+  if (!dev.allow_wan_access) return { removed, added, reason: 'wan-access-off' };
+  if (!target) return { removed, added, reason: target === null ? 'peer-or-zone-missing' : 'synced' };
+  return { removed, added, reason: 'synced' };
 }
 
 /**

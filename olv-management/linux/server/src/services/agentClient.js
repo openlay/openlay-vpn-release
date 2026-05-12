@@ -13,6 +13,44 @@ class AgentClient {
     return registry.sendCommand(this.serverId, type, payload, timeoutMs);
   }
 
+  /**
+   * Like request() but retries on transport-level failures (WS not
+   * connected / command timed out). Only safe for commands the agent
+   * handles idempotently — handler must either (a) be naturally
+   * idempotent (read, remove-by-id, replaceGroup) or (b) dedup repeats
+   * (addRule with content-equal guard). Do NOT use for addPeer /
+   * createInterface — repeating those creates ghost state.
+   *
+   * Backoff: 500ms → 2s → 5s. Caps at `attempts` total tries. After the
+   * final timeout the original error propagates.
+   *
+   * Why this exists: ena0 Tx stalls on EC2 (and the equivalent on any
+   * cloud NIC) cause WS commands to time out at 10s even though the
+   * agent processed the request and the response is in flight. Without
+   * retry, callers like ruleOrchestrator silently abandon the rebuild
+   * half-way and rules disappear (observed prod 2026-05-12).
+   */
+  async requestIdempotent(type, payload = {}, timeoutMs = 10000, attempts = 3) {
+    const backoffs = [500, 2000, 5000];
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await registry.sendCommand(this.serverId, type, payload, timeoutMs);
+      } catch (err) {
+        lastErr = err;
+        // Only retry transport failures. Business errors (validation,
+        // not-found, etc.) have no status or a 4xx status — those are
+        // deterministic and re-sending won't help.
+        if (err.status !== 503 && err.status !== 504) throw err;
+        if (i === attempts - 1) break;
+        const wait = backoffs[Math.min(i, backoffs.length - 1)];
+        console.warn(`[AgentClient] ${type} on server=${this.serverId} ${err.status === 503 ? 'not connected' : 'timed out'} — retry ${i + 1}/${attempts - 1} in ${wait}ms`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+    throw lastErr;
+  }
+
   // Health
   health() { return this.request('health', {}, 5000); }
   healthFast() { return this.request('health', {}, 3000); }
@@ -59,44 +97,62 @@ class AgentClient {
   getAuditLogs(limit, offset) { return this.request('getAuditLogs', { limit, offset }); }
 
   // Firewall — Layer 3/4
-  firewallGetPolicy() { return this.request('firewallGetPolicy'); }
-  firewallSetPolicy(defaultPolicy) { return this.request('firewallSetPolicy', { defaultPolicy }); }
-  firewallGetRules(iface) { return this.request('firewallGetRules', { iface }); }
-  firewallGetAllRules() { return this.request('firewallGetAllRules'); }
-  firewallListLive(iface) { return this.request('firewallListLive', { iface }); }
-  firewallGetLogs(filter) { return this.request('firewallGetLogs', filter || {}, 15000); }
-  firewallAddRule(iface, rule) { return this.request('firewallAddRule', { iface, rule }); }
-  firewallRemoveRule(iface, ruleId) { return this.request('firewallRemoveRule', { iface, ruleId }); }
-  firewallRemoveGroup(iface, groupId) { return this.request('firewallRemoveGroup', { iface, groupId }); }
-  firewallListAllRules() { return this.request('firewallGetAllRules'); }
-  firewallFlushRules(iface) { return this.request('firewallFlushRules', { iface }); }
-  firewallBlockIP(iface, ip, direction) { return this.request('firewallBlockIP', { iface, ip, direction }); }
-  firewallAllowIP(iface, ip, direction) { return this.request('firewallAllowIP', { iface, ip, direction }); }
-  firewallBlockPort(iface, port, protocol) { return this.request('firewallBlockPort', { iface, port, protocol }); }
-  firewallAllowPort(iface, port, protocol) { return this.request('firewallAllowPort', { iface, port, protocol }); }
-  firewallBlockPeer(iface, peerIP) { return this.request('firewallBlockPeer', { iface, peerIP }); }
-  firewallRateLimitPeer(iface, peerIP, rateKbps) { return this.request('firewallRateLimitPeer', { iface, peerIP, rateKbps }); }
+  //
+  // All firewall RPCs go through requestIdempotent: reads are pure;
+  // mutations are idempotent at the agent (addRule has content-dedup,
+  // removeRule/removeGroup are no-op when target is gone, replaceGroup
+  // is a whole-group swap with deterministic output, flushRules
+  // converges to empty).
+  firewallGetPolicy() { return this.requestIdempotent('firewallGetPolicy'); }
+  firewallSetPolicy(defaultPolicy) { return this.requestIdempotent('firewallSetPolicy', { defaultPolicy }); }
+  firewallGetRules(iface) { return this.requestIdempotent('firewallGetRules', { iface }); }
+  firewallGetAllRules() { return this.requestIdempotent('firewallGetAllRules'); }
+  firewallListLive(iface) { return this.requestIdempotent('firewallListLive', { iface }); }
+  firewallGetLogs(filter) { return this.requestIdempotent('firewallGetLogs', filter || {}, 15000); }
+  firewallAddRule(iface, rule) { return this.requestIdempotent('firewallAddRule', { iface, rule }); }
+  firewallRemoveRule(iface, ruleId) { return this.requestIdempotent('firewallRemoveRule', { iface, ruleId }); }
+  firewallRemoveGroup(iface, groupId) { return this.requestIdempotent('firewallRemoveGroup', { iface, groupId }); }
+  // Atomically swap every rule in `groupId` for the provided list. Single
+  // RPC — agent holds Store.mu across load+filter+save+rebuild, so a WS
+  // timeout either commits the whole change or leaves the prior state
+  // untouched. Use this instead of removeGroup+addRule×N for any rebuild
+  // (resync, app-server sync, wan-access sync) where partial commit
+  // would lose rules.
+  firewallReplaceGroup(iface, groupId, rules) {
+    return this.requestIdempotent('firewallReplaceGroup', { iface, groupId, rules });
+  }
+  firewallListAllRules() { return this.requestIdempotent('firewallGetAllRules'); }
+  firewallFlushRules(iface) { return this.requestIdempotent('firewallFlushRules', { iface }); }
+  // Convenience wrappers — block/allow IP/port/peer are server-side
+  // sugar over addRule on the agent (same dedup), so retrying is safe.
+  firewallBlockIP(iface, ip, direction) { return this.requestIdempotent('firewallBlockIP', { iface, ip, direction }); }
+  firewallAllowIP(iface, ip, direction) { return this.requestIdempotent('firewallAllowIP', { iface, ip, direction }); }
+  firewallBlockPort(iface, port, protocol) { return this.requestIdempotent('firewallBlockPort', { iface, port, protocol }); }
+  firewallAllowPort(iface, port, protocol) { return this.requestIdempotent('firewallAllowPort', { iface, port, protocol }); }
+  firewallBlockPeer(iface, peerIP) { return this.requestIdempotent('firewallBlockPeer', { iface, peerIP }); }
+  firewallRateLimitPeer(iface, peerIP, rateKbps) { return this.requestIdempotent('firewallRateLimitPeer', { iface, peerIP, rateKbps }); }
 
-  // Router — static routes (M1)
-  routerListRoutes(iface) { return this.request('routerListRoutes', { iface }); }
-  routerGetAllRoutes() { return this.request('routerGetAllRoutes'); }
-  routerAddRoute(iface, route) { return this.request('routerAddRoute', { iface, route }); }
-  routerUpdateRoute(iface, id, patch) { return this.request('routerUpdateRoute', { iface, id, patch }); }
-  routerRemoveRoute(iface, id) { return this.request('routerRemoveRoute', { iface, id }); }
-  routerEnableRoute(iface, id) { return this.request('routerEnableRoute', { iface, id }); }
-  routerDisableRoute(iface, id) { return this.request('routerDisableRoute', { iface, id }); }
-  routerFlushRoutes(iface) { return this.request('routerFlushRoutes', { iface }); }
-  routerListLive(fib) { return this.request('routerListLive', { fib: fib || 0 }); }
+  // Router — static routes (M1). Reads + set-shaped mutations are all
+  // idempotent at the agent.
+  routerListRoutes(iface) { return this.requestIdempotent('routerListRoutes', { iface }); }
+  routerGetAllRoutes() { return this.requestIdempotent('routerGetAllRoutes'); }
+  routerAddRoute(iface, route) { return this.requestIdempotent('routerAddRoute', { iface, route }); }
+  routerUpdateRoute(iface, id, patch) { return this.requestIdempotent('routerUpdateRoute', { iface, id, patch }); }
+  routerRemoveRoute(iface, id) { return this.requestIdempotent('routerRemoveRoute', { iface, id }); }
+  routerEnableRoute(iface, id) { return this.requestIdempotent('routerEnableRoute', { iface, id }); }
+  routerDisableRoute(iface, id) { return this.requestIdempotent('routerDisableRoute', { iface, id }); }
+  routerFlushRoutes(iface) { return this.requestIdempotent('routerFlushRoutes', { iface }); }
+  routerListLive(fib) { return this.requestIdempotent('routerListLive', { fib: fib || 0 }); }
 
   // Router — policy-based routing (M2)
-  routerListPolicies() { return this.request('routerListPolicies'); }
-  routerAddPolicy(policy) { return this.request('routerAddPolicy', { policy }); }
-  routerUpdatePolicy(id, patch) { return this.request('routerUpdatePolicy', { id, patch }); }
-  routerRemovePolicy(id) { return this.request('routerRemovePolicy', { id }); }
-  routerEnablePolicy(id) { return this.request('routerEnablePolicy', { id }); }
-  routerDisablePolicy(id) { return this.request('routerDisablePolicy', { id }); }
-  routerGetFibInfo() { return this.request('routerGetFibInfo'); }
-  routerListLivePolicies() { return this.request('routerListLivePolicies'); }
+  routerListPolicies() { return this.requestIdempotent('routerListPolicies'); }
+  routerAddPolicy(policy) { return this.requestIdempotent('routerAddPolicy', { policy }); }
+  routerUpdatePolicy(id, patch) { return this.requestIdempotent('routerUpdatePolicy', { id, patch }); }
+  routerRemovePolicy(id) { return this.requestIdempotent('routerRemovePolicy', { id }); }
+  routerEnablePolicy(id) { return this.requestIdempotent('routerEnablePolicy', { id }); }
+  routerDisablePolicy(id) { return this.requestIdempotent('routerDisablePolicy', { id }); }
+  routerGetFibInfo() { return this.requestIdempotent('routerGetFibInfo'); }
+  routerListLivePolicies() { return this.requestIdempotent('routerListLivePolicies'); }
 
   // NAT — SNAT (M3)
   natListRules() { return this.request('natListRules'); }
