@@ -45,7 +45,7 @@ Actions:
   init-root   Create root admin account (olv-management only)
 
 Packages:
-  olv-management   Management server + App API + Dashboard (Linux)
+  olv-management   Management server + App API (Linux)
   olv-agent        WireGuard agent (FreeBSD, native)
 
 Examples:

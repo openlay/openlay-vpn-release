@@ -8,7 +8,7 @@ Server deployment packages for OpenLay VPN infrastructure.
 ┌──────────────────────────────────┐       ┌──────────────────────────────┐
 │  Management Server (Linux)       │       │  VPN Agent (FreeBSD)         │
 │  ┌────────────────────────────┐  │  WSS  │  ┌────────────────────────┐  │
-│  │ Admin Dashboard (port 3084)│◄─┼───────┼──│ WireGuard (if_wg)      │  │
+│  │ Admin API (port 3084)      │◄─┼───────┼──│ WireGuard (if_wg)      │  │
 │  │ REST API                   │  │       │  │ Firewall (pf)          │  │
 │  │ WebSocket Agent Hub        │  │       │  │ DNS Filter             │  │
 │  ├────────────────────────────┤  │       │  └────────────────────────┘  │
@@ -29,7 +29,7 @@ These are **separate packages** installed on **different servers**:
 
 ## 1. Management Server
 
-The management server runs the admin dashboard, REST API, and VPN client API.
+The management server runs the admin REST API + WebSocket agent hub and the VPN client API. All admin actions are driven from the OpenLay iOS app.
 
 ### Quick Install
 
@@ -45,21 +45,57 @@ The installer will prompt for:
 - PostgreSQL URL
 - JWT secret (auto-generated if blank)
 
-### Create Root Admin
+### Install the Admin App
 
-After install, create the first admin account:
+All admin actions happen in the **OpenLay iOS app** — there is no web UI.
+
+> [Join the TestFlight beta](https://testflight.apple.com/join/nSmM9h5d)
+
+### Create the First Root Admin
+
+There are two ways to create the first root account:
+
+**A. QR + Apple Sign-In (default)** — `install.sh` finishes by printing a
+one-shot QR code and a `ROOT_SETUP_TOKEN`. Open the iOS app → tap **Scan
+Setup QR** on the login screen → scan the QR → sign in with Apple. The
+server upserts the user and grants root. Once a root exists the bootstrap
+endpoint becomes inert (HTTP 410), so this can only be used once.
+
+If you missed the QR, re-print the token from the server:
+
+```bash
+sudo grep ROOT_SETUP_TOKEN /home/olv-management/wireguard-management/.env
+```
+
+**B. Password-based (`init-root.sh`)** — for environments where Apple
+Sign-In isn't usable, or to add additional root accounts later:
 
 ```bash
 sudo ./olv.sh init-root olv-management
 ```
 
-This will prompt for username, email, password and create a root account that can manage all enterprises.
+Prompts for username, email, password and creates the root row directly
+in Postgres.
+
+### Reset the Root Password (lost device or forgotten password)
+
+Re-run `init-root.sh` with the same username — `password_hash` is
+overwritten and **all active sessions for that user are revoked in the
+same transaction**, so any prior device holding an access JWT is logged
+out on its next request:
+
+```bash
+sudo ./olv.sh init-root olv-management
+# enter the existing username, then a new password
+```
+
+The lost device must scan the QR / log in again with the new password.
 
 ### What Gets Installed
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `olv-management` | 3084 | Admin dashboard + API + WebSocket hub |
+| `olv-management` | 3084 | Admin API + WebSocket agent hub |
 | `olv-app-api` | 443 | VPN client API (iOS/macOS/Windows) |
 
 Auto-installs: Node.js 20, PostgreSQL, OpenSSL, TLS certs, systemd services.
@@ -118,7 +154,7 @@ chmod +x olv.sh
 ./olv.sh install olv-agent
 ```
 
-Get an enrollment token from the management dashboard → Settings → Enrollment Tokens.
+Get an enrollment token from the OpenLay iOS management app → Settings → Enrollment Tokens.
 
 ### What Gets Installed
 
