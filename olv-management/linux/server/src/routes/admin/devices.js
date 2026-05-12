@@ -60,6 +60,14 @@ router.get('/', async (req, res) => {
       params.push(status);
       conditions.push(`d.status = $${params.length}`);
     }
+    // Filter: only enabled Linux devices on a profile with can_be_exit_node=TRUE.
+    // Linux gate: only Linux clients implement the PostUp MASQUERADE/forwarding
+    // needed to actually act as an exit node — iOS/macOS NE can't forward host
+    // traffic. Drives the "Exit Node" picker on the device-profile editor so
+    // admins only see devices that will actually work.
+    if (req.query.can_be_exit_node === 'true') {
+      conditions.push(`dp_prof.can_be_exit_node = TRUE AND d.status = 'enabled' AND d.os = 'linux'`);
+    }
 
     if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
     query += ' ORDER BY d.created_at DESC';
@@ -161,6 +169,16 @@ router.put('/:id', async (req, res) => {
     const { name, status } = req.body;
     const profileIdRaw = req.body.profile_id !== undefined ? req.body.profile_id : req.body.profileId;
 
+    // exit_node_device_id was a per-device field in migration 051. Migration
+    // 055 moved the assignment up to device_profiles. Reject the legacy
+    // field at the API boundary so old clients fail loudly instead of
+    // silently no-oping.
+    if (req.body.exit_node_device_id !== undefined || req.body.exitNodeDeviceId !== undefined) {
+      return res.status(400).json({
+        error: 'exit_node_device_id is now set on the device profile. PUT /api/admin/device-profiles/:id with exit_node_device_id instead.',
+      });
+    }
+
     // Determine which "kind" of update this is — same payload, different
     // canonical signed form so the audit log distinguishes a status flip
     // from a profile assignment.
@@ -201,7 +219,6 @@ router.put('/:id', async (req, res) => {
       fields.push(`profile_id = $${idx++}`);
       values.push(profileIdRaw);
     }
-
     if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
 
     fields.push(`updated_at = NOW()`);
@@ -212,6 +229,33 @@ router.put('/:id', async (req, res) => {
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Device not found' });
+
+    // Profile assignment changed -> the device's wan-access state may have
+    // flipped (new profile may have allow_wan_access=true/false different
+    // from the old one). Sync is idempotent. Status flip can also matter
+    // (disabled devices have no rule), so resync on either touch.
+    if (profileIdRaw !== undefined || status !== undefined) {
+      try {
+        const { syncDeviceWanAccessAcrossServers } = require('../../services/deviceWanAccessFirewall');
+        await syncDeviceWanAccessAcrossServers(req.params.id);
+      } catch (err) {
+        console.error(`[devices/PUT] wan-access sync failed for device=${req.params.id}: ${err.message}`);
+      }
+    }
+    // Exit-node routing: on profile_id / status change, this device's
+    // effective exit-node pointer (via its profile) may have flipped or
+    // its agent-side state may need re-eval. Sync handles both consumer
+    // and exit-node roles for this device on every server it has a peer
+    // on.
+    if (profileIdRaw !== undefined || status !== undefined) {
+      try {
+        const { syncDeviceExitNodeAcrossServers } = require('../../services/deviceExitNodeRouting');
+        await syncDeviceExitNodeAcrossServers(req.params.id);
+      } catch (err) {
+        console.error(`[devices/PUT] exit-node sync failed for device=${req.params.id}: ${err.message}`);
+      }
+    }
+
     res.json({ device: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -525,7 +569,15 @@ router.delete('/:id', async (req, res) => {
     // device BEFORE the DELETE. CASCADE on the FK will wipe the rows
     // entirely, leaving the agent with orphan pf rules unless we
     // explicitly clean them up by id/name.
-    const [{ rows: orphanPolicies }, { rows: orphanApps }] = await Promise.all([
+    // Same reason for peers_meta.server_id: we need the server set to
+    // tear down wan-access rules; ON DELETE SET NULL on peers_meta would
+    // keep rows but lose the device_id linkage post-delete.
+    const [
+      { rows: orphanPolicies },
+      { rows: orphanApps },
+      { rows: wanAccessServers },
+      { rows: exitNodeProfiles },
+    ] = await Promise.all([
       pool.query(
         `SELECT server_id, name FROM route_policies
           WHERE ingress_type = 'device' AND ingress_device_id = $1`,
@@ -534,6 +586,19 @@ router.delete('/:id', async (req, res) => {
       pool.query(
         `SELECT id, server_id FROM application_servers
           WHERE target_device_id = $1`,
+        [req.params.id]
+      ),
+      pool.query(
+        'SELECT DISTINCT server_id FROM peers_meta WHERE device_id = $1',
+        [req.params.id]
+      ),
+      // Profiles using THIS device as their exit node — after the DELETE
+      // the FK in `device_profiles.exit_node_device_id` becomes NULL (ON
+      // DELETE SET NULL). We snapshot now so we can fan out resync to
+      // every member of those profiles and tear down stale PBR rules +
+      // restore the (now-gone) exit peer's AllowedIPs.
+      pool.query(
+        'SELECT id FROM device_profiles WHERE exit_node_device_id = $1',
         [req.params.id]
       ),
     ]);
@@ -564,6 +629,42 @@ router.delete('/:id', async (req, res) => {
         try { await removeAppServerRules(a.server_id, a.id); }
         catch (e) { console.warn(`[devices/delete] app cleanup id=${a.id}: ${e.message}`); }
       }));
+    }
+
+    // Force-remove orphan wan-access rules (groupId = wan-access-<deviceId>).
+    // resyncRulesByUsers chain doesn't catch this case because the device
+    // row is gone — the user-keyed sync would skip it.
+    if (wanAccessServers.length > 0) {
+      const { removeDeviceWanAccessRules } = require('../../services/deviceWanAccessFirewall');
+      await Promise.allSettled(wanAccessServers.map(async w => {
+        try { await removeDeviceWanAccessRules(w.server_id, req.params.id); }
+        catch (e) { console.warn(`[devices/delete] wan-access cleanup server=${w.server_id}: ${e.message}`); }
+      }));
+    }
+
+    // Exit-node cleanup for the deleted device:
+    // (a) tear down THIS device's PBR rule on each server it had a peer
+    //     on — its own consumer-policy is identified by its id and the
+    //     peer is gone now, so the rule must go;
+    // (b) for every profile that pointed AT this device as exit, fan
+    //     out a sync — the FK cascade SET NULL'd the column already, so
+    //     each profile member's PBR (consumer) and the (now-gone) exit
+    //     peer's AllowedIPs need to converge to "no exit-node".
+    {
+      const { removeDeviceExitNodeRules, syncProfileExitNodeAcrossServers } =
+        require('../../services/deviceExitNodeRouting');
+      if (wanAccessServers.length > 0) {
+        await Promise.allSettled(wanAccessServers.map(async w => {
+          try { await removeDeviceExitNodeRules(w.server_id, req.params.id); }
+          catch (e) { console.warn(`[devices/delete] exit-node consumer cleanup server=${w.server_id}: ${e.message}`); }
+        }));
+      }
+      if (exitNodeProfiles.length > 0) {
+        await Promise.allSettled(exitNodeProfiles.map(async p => {
+          try { await syncProfileExitNodeAcrossServers(p.id, req.params.id); }
+          catch (e) { console.warn(`[devices/delete] exit-node profile resync id=${p.id}: ${e.message}`); }
+        }));
+      }
     }
 
     res.json({ deleted: true });

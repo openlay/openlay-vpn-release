@@ -127,10 +127,11 @@ router.delete('/:iface/rules/:ruleId', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
     const client = await getClient(req.params.serverId, req);
-    // Refuse deletion of auto-managed rules (groupId prefix "app-").
-    // These are owned by Application Server feature; admin must edit
+    // Refuse deletion of auto-managed rules. These are owned by another
+    // surface (Application Server, Device Profile, etc.); admin must edit
     // via that surface, otherwise the next sync would just re-push.
     const { isAppManagedGroupId } = require('../services/appServerFirewall');
+    const { isWanAccessManagedGroupId } = require('../services/deviceWanAccessFirewall');
     const all = await client.firewallGetAllRules().catch(() => ({ interfaces: {} }));
     const ifaceRules = all.interfaces?.[req.params.iface] || [];
     const target = ifaceRules.find(r =>
@@ -139,6 +140,11 @@ router.delete('/:iface/rules/:ruleId', async (req, res) => {
     if (target && isAppManagedGroupId(target.groupId)) {
       return res.status(403).json({
         error: `Rule "${target.label || target.groupId}" is managed by an Application Server. Edit via the Applications tab — direct firewall edits get overwritten on next sync.`,
+      });
+    }
+    if (target && isWanAccessManagedGroupId(target.groupId)) {
+      return res.status(403).json({
+        error: `Rule "${target.label || target.groupId}" is managed by a Device Profile (Allow WAN Access). Edit via the Device Profiles tab — direct firewall edits get overwritten on next sync.`,
       });
     }
     const result = await deleteLogicalRule(parseInt(req.params.serverId), req.params.iface, req.params.ruleId);

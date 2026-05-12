@@ -228,6 +228,24 @@ async function resyncRulesByUsers(serverId, userIds) {
   } catch (err) {
     console.error(`[ruleOrchestrator] app-server firewall sync failed:`, err.message);
   }
+  // Device-Profile WAN-access auto-rules — keyed on (device, server).
+  // Peer IP changes (reconnect, churn) move the srcIP, so any user touched
+  // here needs every owned device's rule re-pushed with the fresh IP.
+  try {
+    const { syncWanAccessForUsers } = require('./deviceWanAccessFirewall');
+    await syncWanAccessForUsers(serverId, userIds);
+  } catch (err) {
+    console.error(`[ruleOrchestrator] wan-access sync failed:`, err.message);
+  }
+  // Exit-node PBR rules — both directions: (a) consumers owned by these
+  // users and (b) consumers pointing at devices owned by these users
+  // (because the exit peer's IP just moved).
+  try {
+    const { syncExitNodeForUsers } = require('./deviceExitNodeRouting');
+    await syncExitNodeForUsers(serverId, userIds);
+  } catch (err) {
+    console.error(`[ruleOrchestrator] exit-node sync failed:`, err.message);
+  }
 }
 
 async function resyncRulesWhere(serverId, predicate) {

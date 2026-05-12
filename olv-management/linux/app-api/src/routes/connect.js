@@ -365,7 +365,7 @@ router.post('/', async (req, res) => {
     let profile = null;
     if (device.profile_id) {
       const { rows: profileRows } = await pool.query(
-        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture FROM device_profiles WHERE id = $1',
+        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture, can_be_exit_node FROM device_profiles WHERE id = $1',
         [device.profile_id]
       );
       profile = profileRows[0] || null;
@@ -591,6 +591,27 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // Exit-node mode signal: when this device's profile has
+    // can_be_exit_node=TRUE AND the device runs Linux, signal exit-node
+    // mode. Only the Linux client implements PostUp/PostDown to enable
+    // IP forwarding + iptables MASQUERADE — iOS/macOS NetworkExtension
+    // sandbox can't forward host traffic, Windows isn't wired yet, and
+    // Android is a placeholder. Silently downgrade non-Linux devices to
+    // role="client" even if their profile is marked exit-capable, so we
+    // don't blackhole consumers' WAN traffic.
+    //
+    // We also surface the VPN subnet (e.g. "10.10.0.0/24") so the Linux
+    // client's PostUp can `ip route add <subnet> dev %i` — required so
+    // reply traffic to consumer peers (DNAT'd back to 10.x.x.x by
+    // conntrack) routes back into wg0. Without this route, replies fall
+    // through to eth0 default and get dropped because 10.x.x.x isn't
+    // reachable on the public iface. Comes from the same `subnet` row
+    // already loaded above for assignedIp allocation.
+    const isExitNode = !!profile?.can_be_exit_node && device.os === 'linux';
+    const exitNodePayload = isExitNode
+      ? { wanIface: 'auto', vpnSubnet: subnet?.cidr || null }
+      : null;
+
     res.status(201).json({
       peerId: peerMeta[0].id,
       assignedIp: allowedIPs,
@@ -604,6 +625,8 @@ router.post('/', async (req, res) => {
       persistentKeepalive: 25,
       serverName: server.name,
       application_servers,
+      role: isExitNode ? 'exit_node' : 'client',
+      exitNode: exitNodePayload,
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -677,7 +700,7 @@ refreshRouter.post('/', async (req, res) => {
     let profile = null;
     if (device.profile_id) {
       const { rows: profileRows } = await pool.query(
-        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture FROM device_profiles WHERE id = $1',
+        'SELECT allowed_ips, exclusion_ips, exclusion_domains, require_posture, can_be_exit_node FROM device_profiles WHERE id = $1',
         [device.profile_id]
       );
       profile = profileRows[0] || null;
@@ -830,6 +853,11 @@ refreshRouter.post('/', async (req, res) => {
       }
     }
 
+    // See /api/connect for the OS gate rationale + vpnSubnet usage.
+    const isExitNode = !!profile?.can_be_exit_node && device.os === 'linux';
+    const exitNodePayload = isExitNode
+      ? { wanIface: 'auto', vpnSubnet: subnet?.cidr || null }
+      : null;
     res.status(200).json({
       peerId: newPeerId,
       assignedIp: allowedIPs,
@@ -843,6 +871,8 @@ refreshRouter.post('/', async (req, res) => {
       persistentKeepalive: 25,
       serverName: old.server_name,
       application_servers,
+      role: isExitNode ? 'exit_node' : 'client',
+      exitNode: exitNodePayload,
     });
   } catch (err) {
     console.error('[refresh] unhandled error:', err);
