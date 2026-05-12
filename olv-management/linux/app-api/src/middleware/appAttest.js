@@ -29,6 +29,19 @@ async function appAttest(req, res, next) {
   // Look up device + attestation env so we can decide whether App Attest
   // applies to this request, and reject development-environment devices
   // when APP_ATTEST_PRODUCTION=true.
+  //
+  // SECURITY: the device lookup must be scoped to the authenticated user.
+  // Previously this used `req.body.deviceId` alone, so any attacker who
+  // knew the deviceId/hardware_id of an unattested device (e.g. someone
+  // else's password-auth device) could include it in their body and the
+  // middleware would `return next()`, bypassing App Attest entirely. The
+  // `AND d.user_id = $2` join binds the bypass decision to the JWT
+  // identity — using another user's deviceId now resolves to zero rows,
+  // falling through to the strict assertion path.
+  if (!req.user?.id) {
+    console.log('[App Attest] no req.user.id — jwtAuth must run before this middleware');
+    return res.status(403).json({ error: APP_ATTEST_USER_ERROR });
+  }
   const { deviceId } = req.body;
   let deviceRow = null;
   if (deviceId) {
@@ -37,8 +50,9 @@ async function appAttest(req, res, next) {
          FROM devices d
          LEFT JOIN users u ON d.user_id = u.id
          LEFT JOIN device_attestations da ON da.device_id = d.id
-        WHERE d.id = $1 OR d.hardware_id = $1`,
-      [deviceId]
+        WHERE (d.id = $1 OR d.hardware_id = $1)
+          AND d.user_id = $2`,
+      [deviceId, req.user.id]
     );
     if (rows.length > 0) {
       deviceRow = rows[0];

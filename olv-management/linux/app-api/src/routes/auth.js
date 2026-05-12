@@ -273,8 +273,55 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// POST /api/auth/device/challenge — issue a one-time challenge for the
+// next /api/auth/device call. Caller posts { deviceId }; server returns
+// { challenge, expiresAt }. Challenges live for DEVICE_AUTH_CHALLENGE_TTL_S
+// seconds and are single-use — the matching /device call marks it used,
+// after which any replay (including the legitimate caller retrying) fails.
+//
+// Why this exists: the previous flow let the client supply its own
+// challenge with replay defence reduced to "reject EXACTLY the last value
+// stored on the device row". Any other captured (challenge, signature)
+// tuple replayed forever. Server-issued one-time challenges are the
+// standard defence — same shape as attest_challenges and the Apple Sign
+// In challenge flow.
+const DEVICE_AUTH_CHALLENGE_TTL_S = 120;
+
+router.post('/device/challenge', async (req, res) => {
+  try {
+    const { deviceId } = req.body || {};
+    if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
+
+    const { rows } = await pool.query(
+      'SELECT id, status FROM devices WHERE id = $1 OR hardware_id = $1',
+      [deviceId]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Device not found' });
+    if (rows[0].status !== 'enabled') {
+      return res.status(403).json({ error: 'Device is not enabled' });
+    }
+
+    const challenge = crypto.randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + DEVICE_AUTH_CHALLENGE_TTL_S * 1000);
+    await pool.query(
+      `INSERT INTO device_auth_challenges (device_id, challenge, expires_at)
+       VALUES ($1, $2, $3)`,
+      [rows[0].id, challenge, expiresAt]
+    );
+
+    res.json({ challenge, expiresAt: expiresAt.toISOString() });
+  } catch (err) {
+    console.error('[auth/device/challenge] error:', err.message);
+    res.status(500).json({ error: 'Failed to issue challenge' });
+  }
+});
+
 // POST /api/auth/device — SE signature login for enroll-type users
 // body: { deviceId, challenge, signature }
+//
+// Challenge MUST have been issued by /api/auth/device/challenge for this
+// device. Single-use: marked used on first successful verify; replays
+// (including legitimate retries with the same body) fail with 401.
 router.post('/device', async (req, res) => {
   try {
     const { deviceId, challenge, signature } = req.body || {};
@@ -292,16 +339,59 @@ router.post('/device', async (req, res) => {
     if (device.status !== 'enabled') {
       return res.status(403).json({ error: 'Device is not enabled' });
     }
-    if (device.last_auth_challenge && device.last_auth_challenge === challenge) {
-      return res.status(401).json({ error: 'Replay detected' });
+
+    // Validate challenge — two paths, both enforce single-use via the
+    // device_auth_challenges UNIQUE(challenge) constraint:
+    //
+    //   1. Strict (preferred): challenge was issued by
+    //      /api/auth/device/challenge, lives in DB with used=FALSE +
+    //      not expired. Atomic UPDATE...RETURNING marks it used.
+    //
+    //   2. Transitional: legacy clients still pick their own challenge.
+    //      We accept it IF it's long enough to be unguessable AND not
+    //      previously seen for any device — INSERT with used=TRUE
+    //      records it; UNIQUE collision = replay = 401. This keeps
+    //      existing iOS/macOS/linux clients working through the
+    //      rollout window while still closing the "replay-forever"
+    //      hole the old logic had.
+    //
+    // Remove the transitional branch once all clients call
+    // /api/auth/device/challenge first.
+    const { rows: challRows } = await pool.query(
+      `UPDATE device_auth_challenges
+          SET used = TRUE
+        WHERE challenge = $1 AND device_id = $2
+          AND used = FALSE AND expires_at > NOW()
+        RETURNING id`,
+      [challenge, device.id]
+    );
+    if (challRows.length === 0) {
+      // No server-issued challenge matched. Fall back to legacy
+      // client-chosen challenge with single-use enforcement.
+      if (typeof challenge !== 'string' || challenge.length < 32) {
+        return res.status(401).json({ error: 'Invalid or expired challenge' });
+      }
+      try {
+        await pool.query(
+          `INSERT INTO device_auth_challenges (device_id, challenge, expires_at, used)
+           VALUES ($1, $2, NOW() + INTERVAL '5 minutes', TRUE)`,
+          [device.id, challenge]
+        );
+      } catch (err) {
+        // PostgreSQL unique_violation: this challenge was already used.
+        if (err.code === '23505') {
+          return res.status(401).json({ error: 'Challenge already used (replay detected)' });
+        }
+        throw err;
+      }
     }
 
     const ok = verifySecureEnclaveSignature(device.public_key, challenge, signature);
     if (!ok) return res.status(401).json({ error: 'Invalid signature' });
 
     await pool.query(
-      'UPDATE devices SET last_auth_challenge = $1, last_auth_at = NOW() WHERE id = $2',
-      [challenge, device.id]
+      'UPDATE devices SET last_auth_at = NOW() WHERE id = $1',
+      [device.id]
     );
 
     const { rows: userRows } = await pool.query(

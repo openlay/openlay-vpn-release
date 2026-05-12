@@ -5,10 +5,17 @@ const { syncSubnets } = require('../services/subnetSync');
 
 const router = Router();
 
-// Auth middleware for agent endpoints
+// Auth middleware for agent endpoints. Fails closed: an empty/missing
+// MANAGEMENT_API_TOKEN means anyone reachable on the port can register or
+// overwrite a server row. The boot-time guard in config.js refuses to start
+// with an empty token outside dev, but we duplicate the check here so a
+// future config refactor can't silently re-open the bypass.
 function agentAuth(req, res, next) {
   const expectedToken = config.managementApiToken;
-  if (!expectedToken) return next();
+  if (!expectedToken) {
+    if (process.env.NODE_ENV === 'development') return next();
+    return res.status(503).json({ error: 'Agent endpoint disabled: MANAGEMENT_API_TOKEN not configured' });
+  }
 
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {

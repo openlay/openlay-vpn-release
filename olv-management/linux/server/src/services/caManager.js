@@ -88,6 +88,18 @@ class CAManager {
     const os = require('os');
     const path = require('path');
 
+    // Strict whitelist before agentId touches the openssl extfile. A
+    // newline or `]\n[other_ext]...` in agentId would let an enrollment
+    // request inject arbitrary x509 extensions (including CA:TRUE) into
+    // the signed cert. The CN/SAN spec for our agents is plain
+    // alphanumeric + ".-_" — anything else is either a typo or an attack.
+    if (typeof agentId !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(agentId)) {
+      throw Object.assign(
+        new Error('Invalid agentId: must be 1-64 chars of [A-Za-z0-9_.-]'),
+        { status: 400 }
+      );
+    }
+
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-'));
     const caKeyPath = path.join(tmpDir, 'ca.key');
     const caCertPath = path.join(tmpDir, 'ca.crt');
@@ -101,7 +113,8 @@ class CAManager {
       fs.writeFileSync(caCertPath, this.caCert);
       fs.writeFileSync(csrPath, csrPem);
 
-      // Extensions config — embed agentId in SAN
+      // Extensions config — agentId already validated against the strict
+      // whitelist above, so the interpolation is now injection-safe.
       fs.writeFileSync(extPath, `
 [agent]
 basicConstraints = CA:FALSE

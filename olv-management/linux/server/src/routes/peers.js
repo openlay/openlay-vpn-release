@@ -39,18 +39,31 @@ router.get('/', async (req, res) => {
 
     // Enrich with local metadata + user enterprise alias + device os (client type)
     const entId = req.enterpriseId;
+    const params = [req.params.serverId, req.params.iface];
+    let entIdSelect = '';
+    let entIdJoin = '';
+    if (entId) {
+      params.push(entId);
+      entIdSelect = `, uer.alias as user_alias`;
+      // Parametrised — entId comes from req.enterpriseId (header-driven) so
+      // it must NEVER reach SQL as a string literal. The previous
+      // `'${entId.replace(/'/g, "''")}'` interpolation was a textbook
+      // SQL injection footgun even though backslash payloads are blunted
+      // by standard_conforming_strings.
+      entIdJoin = `LEFT JOIN user_enterprise_roles uer ON uer.user_id = pm.user_id AND uer.enterprise_id = $${params.length}`;
+    }
     const { rows: metaRows } = await pool.query(
       `SELECT pm.*, s.cidr as subnet_cidr, s.name as subnet_name,
               u.name as user_name, u.email as user_email,
               d.id as device_id, d.name as device_name, d.os as device_os
-              ${entId ? `, uer.alias as user_alias` : ''}
+              ${entIdSelect}
        FROM peers_meta pm
        LEFT JOIN subnets s ON pm.subnet_id = s.id
        LEFT JOIN users u ON pm.user_id = u.id
        LEFT JOIN devices d ON pm.device_id = d.id
-       ${entId ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = pm.user_id AND uer.enterprise_id = '${entId.replace(/'/g, "''")}'` : ''}
+       ${entIdJoin}
        WHERE pm.server_id = $1 AND pm.interface_name = $2`,
-      [req.params.serverId, req.params.iface]
+      params
     );
 
     const metaMap = new Map(metaRows.map(m => [m.public_key, m]));

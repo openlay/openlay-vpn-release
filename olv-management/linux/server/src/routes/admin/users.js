@@ -55,10 +55,17 @@ router.get('/', async (req, res) => {
     }
 
     const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
-    // Join enterprise role to get alias for current enterprise context
-    const aliasJoin = req.enterpriseId
-      ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = '${req.enterpriseId.replace(/'/g, "''")}'`
-      : `LEFT JOIN (SELECT DISTINCT ON (user_id) user_id, alias FROM user_enterprise_roles ORDER BY user_id, created_at) uer ON uer.user_id = u.id`;
+    // Join enterprise role to get alias for current enterprise context.
+    // Parametrised — enterpriseId is header-driven and must never reach SQL
+    // as a literal (was previously string-escaped, still a SQL injection
+    // surface).
+    let aliasJoin;
+    if (req.enterpriseId) {
+      params.push(req.enterpriseId);
+      aliasJoin = `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = $${params.length}`;
+    } else {
+      aliasJoin = `LEFT JOIN (SELECT DISTINCT ON (user_id) user_id, alias FROM user_enterprise_roles ORDER BY user_id, created_at) uer ON uer.user_id = u.id`;
+    }
     const { rows } = await pool.query(`
       SELECT u.*,
         uer.alias as enterprise_alias,

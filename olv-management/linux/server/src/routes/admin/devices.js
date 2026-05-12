@@ -19,8 +19,22 @@ router.get('/', async (req, res) => {
     const isRoot = req.enterpriseRole === 'root';
     const { status } = req.query;
 
-    // Join enterprise alias for the user
+    // Join enterprise alias for the user. enterpriseId is header-driven so
+    // it must be parametrised, not interpolated. Pushed FIRST so its
+    // placeholder index is stable regardless of which optional filters
+    // (isRoot, status, etc.) the request later adds.
     const aliasEntId = req.enterpriseId;
+    const conditions = [];
+    const params = [];
+    let aliasSelect, aliasJoin;
+    if (aliasEntId) {
+      params.push(aliasEntId);
+      aliasSelect = `, uer.alias as user_alias`;
+      aliasJoin = `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = $${params.length}`;
+    } else {
+      aliasSelect = `, (SELECT uer2.alias FROM user_enterprise_roles uer2 WHERE uer2.user_id = u.id AND uer2.alias != '' ORDER BY uer2.created_at LIMIT 1) as user_alias`;
+      aliasJoin = '';
+    }
     let query = `
       SELECT d.*, u.name as user_name, u.email as user_email,
         da.key_id as attest_key_id, da.sign_count as attest_sign_count, da.created_at as attest_date,
@@ -31,7 +45,7 @@ router.get('/', async (req, res) => {
         approver.name as approved_by_name,
         approver.email as approved_by_email,
         approve_log.created_at as approved_at
-        ${aliasEntId ? `, uer.alias as user_alias` : `, (SELECT uer2.alias FROM user_enterprise_roles uer2 WHERE uer2.user_id = u.id AND uer2.alias != '' ORDER BY uer2.created_at LIMIT 1) as user_alias`}
+        ${aliasSelect}
       FROM devices d
       LEFT JOIN users u ON d.user_id = u.id
       LEFT JOIN device_attestations da ON da.device_id = d.id
@@ -47,10 +61,8 @@ router.get('/', async (req, res) => {
          LIMIT 1
       ) approve_log ON TRUE
       LEFT JOIN users approver ON approver.id = approve_log.admin_user_id
-      ${aliasEntId ? `LEFT JOIN user_enterprise_roles uer ON uer.user_id = u.id AND uer.enterprise_id = '${aliasEntId.replace(/'/g, "''")}'` : ''}
+      ${aliasJoin}
     `;
-    const conditions = [];
-    const params = [];
 
     if (!isRoot) {
       params.push(req.enterpriseId);

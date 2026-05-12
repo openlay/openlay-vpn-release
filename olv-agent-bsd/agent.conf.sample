@@ -24,3 +24,19 @@ HEARTBEAT_INTERVAL=30
 # Optional — advertise a specific public URL to the management server.
 # Defaults to cloud-metadata-detected public IP.
 # PUBLIC_URL=https://my-bsd-gateway.example.com
+
+# Management TLS verification. Pick ONE of the two below:
+#
+#   1. Pin the management server's leaf cert (preferred on staging where
+#      cert is self-signed). Copy management's /home/olv-management/
+#      wireguard-management/certs/cert.pem onto the agent and point here.
+#      Hostname identity check is skipped — the pin is by cert content.
+# OLV_MGMT_TLS_CERT=/usr/local/etc/olv-agent/mgmt-cert.pem
+#
+#   2. Skip verification entirely (legacy / bootstrapping only). Loudly
+#      logged on every dial. NEVER set true on production.
+# OLV_MGMT_INSECURE_TLS=false
+#
+# If neither is set, the agent falls back to system root CAs + strict
+# hostname match — works only when management's cert is signed by a
+# publicly-trusted CA (Let's Encrypt etc.).
