@@ -29,7 +29,10 @@ if (corsAllow.length > 0) {
   app.use(cors());
   console.warn('[cors] NODE_ENV=development — Access-Control-Allow-Origin: *');
 }
-app.use(express.json());
+// Tight body-size cap on the public-facing app-api. iOS clients send
+// small JSON; anything beyond 1mb is either accidental (corrupt body)
+// or hostile. enroll attestation blobs top out around 7kb.
+app.use(express.json({ limit: '1mb' }));
 
 // Request/Response logger with bodies — redacted. The unredacted version
 // would dump JWTs issued by /api/auth/apple, Apple identity tokens

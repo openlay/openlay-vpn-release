@@ -4,6 +4,7 @@ const { verifyAttestation } = require('node-app-attest');
 const { pool } = require('../db/pool');
 const config = require('../config');
 const rl = require('../middleware/rateLimit');
+const { sendError } = require('../middleware/errorHandler');
 
 const CODE_VALUE_KEY = 'enrollment_code_value';
 const CODE_EXPIRES_KEY = 'enrollment_code_expires_at';
@@ -30,7 +31,7 @@ router.post('/challenge', rl.enrollChallenge, async (req, res) => {
     );
     res.json({ challenge, expires_at: expiresAt.toISOString() });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -207,7 +208,7 @@ router.post('/', rl.enroll, async (req, res) => {
     });
   } catch (err) {
     console.error('[enroll] error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -236,7 +237,7 @@ router.get('/:id/status', async (req, res) => {
     }
     res.json({ status: r.status });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

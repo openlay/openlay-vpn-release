@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const crypto = require('crypto');
 const { pool } = require('../db/pool');
 const caManager = require('../services/caManager');
@@ -44,7 +45,7 @@ router.post('/tokens', jwtAuth, async (req, res) => {
       useCount: rows[0].use_count,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -71,7 +72,7 @@ router.get('/tokens', jwtAuth, async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -86,7 +87,7 @@ router.post('/tokens/:id/revoke', jwtAuth, async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Token not found' });
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -97,7 +98,7 @@ router.delete('/tokens/:id', jwtAuth, async (req, res) => {
     await pool.query('DELETE FROM enrollment_tokens WHERE id = $1', [req.params.id]);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -220,7 +221,7 @@ router.post('/enroll', async (req, res) => {
     console.log(`[enrollment] Cert issued: serial=${signed.serial} fingerprint=${signed.fingerprint.substring(0, 16)}...`);
   } catch (err) {
     console.error('[enrollment] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -243,7 +244,7 @@ router.get('/certificates', jwtAuth, async (req, res) => {
     );
     res.json({ certificates: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -258,7 +259,7 @@ router.post('/certificates/:id/revoke', jwtAuth, async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Certificate not found' });
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

@@ -3,6 +3,7 @@
 // a key rotation). Kept in its own file so the URL surface
 // (`/api/admin/me/...`) doesn't collide with `users/:id`.
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 
@@ -45,7 +46,7 @@ router.post('/signing-key', async (req, res) => {
     );
     res.json({ registered: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -64,7 +65,7 @@ router.get('/signing-key', async (req, res) => {
       registered_at: rows[0].admin_signing_registered_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -105,7 +106,7 @@ router.post('/encryption-key', async (req, res) => {
     );
     res.json({ registered: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -124,7 +125,7 @@ router.get('/encryption-key', async (req, res) => {
       registered_at: rows[0].admin_encryption_registered_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -144,7 +145,7 @@ router.get('/audit-log', async (req, res) => {
     );
     res.json({ entries: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

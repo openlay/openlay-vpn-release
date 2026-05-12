@@ -1,9 +1,13 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const { isValidCidr, getNextAvailableIp } = require('../services/subnetUtils');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
 const AgentClient = require('../services/agentClient');
+const { isAdmin } = require('../constants/roles');
+const { buildPatch } = require('../utils/buildPatch');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -33,16 +37,6 @@ async function syncAddressesToAgent(serverId, interfaceName) {
   }
 }
 
-// Admin gate: anyone in `root`/`super_admin`/`admin` for this enterprise.
-// Members can read subnets (GET) but mutations (POST/PUT/DELETE) reshape
-// the gateway's address plan + trigger agent setInterfaceAddresses —
-// admin-only is the right scope.
-function requireAdmin(req, res) {
-  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return true;
-  res.status(403).json({ error: 'Admin access required' });
-  return false;
-}
-
 // Verify server is accessible to this user
 async function verifyServerAccess(serverId, req) {
   const isRoot = req.enterpriseRole === 'root';
@@ -63,7 +57,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ subnets: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -102,7 +96,7 @@ router.post('/', async (req, res) => {
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Subnet with this CIDR already exists' });
     if (err.code === '23503') return res.status(404).json({ error: 'Server not found' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -118,7 +112,7 @@ router.get('/:subnetId', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Subnet not found' });
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -128,18 +122,17 @@ router.put('/:subnetId', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     if (!(await verifyServerAccess(req.params.serverId, req)))
       return res.status(404).json({ error: 'Server not found' });
-    const { cidr, interface_name, name, description } = req.body;
+    const { cidr } = req.body || {};
     if (cidr && !isValidCidr(cidr)) {
       return res.status(400).json({ error: 'Invalid CIDR format' });
     }
-    const fields = [];
-    const values = [];
-    let idx = 1;
-    if (cidr !== undefined) { fields.push(`cidr = $${idx++}`); values.push(cidr); }
-    if (interface_name !== undefined) { fields.push(`interface_name = $${idx++}`); values.push(interface_name); }
-    if (name !== undefined) { fields.push(`name = $${idx++}`); values.push(name); }
-    if (description !== undefined) { fields.push(`description = $${idx++}`); values.push(description); }
-    if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
+    const { clause, values, nextIdx } = buildPatch(req.body, {
+      cidr: 'cidr',
+      interface_name: 'interface_name',
+      name: 'name',
+      description: 'description',
+    });
+    if (!clause) return res.status(400).json({ error: 'No fields to update' });
 
     // Get old interface_name before update (for syncing old interface if changed)
     const { rows: oldRows } = await pool.query(
@@ -150,7 +143,7 @@ router.put('/:subnetId', async (req, res) => {
 
     values.push(req.params.subnetId, req.params.serverId);
     const { rows } = await pool.query(
-      `UPDATE subnets SET ${fields.join(', ')} WHERE id = $${idx++} AND server_id = $${idx} RETURNING *`,
+      `UPDATE subnets SET ${clause} WHERE id = $${nextIdx} AND server_id = $${nextIdx + 1} RETURNING *`,
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Subnet not found' });
@@ -187,7 +180,7 @@ router.put('/:subnetId', async (req, res) => {
     res.json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Subnet CIDR conflict' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -252,7 +245,7 @@ router.delete('/:subnetId', async (req, res) => {
 
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -298,7 +291,7 @@ router.get('/:subnetId/next-ip', async (req, res) => {
     if (!nextIp) return res.status(409).json({ error: 'No available IPs in this subnet' });
     res.json({ ip: nextIp, cidr: `${nextIp}/32` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

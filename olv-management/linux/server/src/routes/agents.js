@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const config = require('../config');
 const { syncSubnets } = require('../services/subnetSync');
@@ -116,7 +117,7 @@ router.post('/register', async (req, res) => {
     });
   } catch (err) {
     console.error('[agents] Registration failed:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -171,7 +172,7 @@ router.post('/heartbeat', async (req, res) => {
 
     res.json({ ok: true, id: found.id, newSubnets: createdSubnets });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -195,7 +196,7 @@ router.post('/deregister', async (req, res) => {
 
     res.json({ ok: true, message: `Agent "${name}" deregistered` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

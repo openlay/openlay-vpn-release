@@ -10,9 +10,12 @@
 //
 // JSON convention: snake_case on the wire (per repo-wide rule).
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const enterpriseContext = require('../middleware/enterpriseContext');
 const { syncAppServerFirewall, removeAppServerRules } = require('../services/appServerFirewall');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -30,14 +33,6 @@ async function verifyAccess(serverId, req) {
   if (rows.length === 0) throw Object.assign(new Error('Server not found'), { status: 404 });
   if (rows[0].access_mode === 'public' && !isRoot) throw Object.assign(new Error('Root required'), { status: 403 });
   return rows[0];
-}
-
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required' });
-    return false;
-  }
-  return true;
 }
 
 /** Validate body for target_type + matching reference field. Returns
@@ -138,7 +133,7 @@ router.get('/', async (req, res) => {
       application_servers: rows.map(r => shapeRow(r, acl)),
     });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -189,7 +184,7 @@ router.post('/', async (req, res) => {
       dbClient.release();
     }
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -272,7 +267,7 @@ router.put('/:id', async (req, res) => {
       dbClient.release();
     }
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -290,7 +285,7 @@ router.delete('/:id', async (req, res) => {
       .catch(err => console.error(`[application-servers] firewall cleanup app=${req.params.id} failed:`, err.message));
     res.json({ deleted: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

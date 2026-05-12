@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const enterpriseContext = require('../middleware/enterpriseContext');
@@ -25,7 +26,7 @@ router.get('/:iface', async (req, res) => {
     const data = await client.getStatus(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -37,7 +38,7 @@ router.get('/:iface/connected', async (req, res) => {
     const data = await client.getConnected(req.params.iface, activeWithin);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -48,7 +49,7 @@ router.get('/:iface/transfer', async (req, res) => {
     const data = await client.getTransfer(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -59,7 +60,7 @@ router.get('/:iface/handshakes', async (req, res) => {
     const data = await client.getHandshakes(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -70,7 +71,7 @@ router.get('/:iface/peers/:pubkey', async (req, res) => {
     const data = await client.getPeerStatus(req.params.iface, decodeURIComponent(req.params.pubkey));
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -81,7 +82,7 @@ router.get('/:iface/transfer/:pubkey', async (req, res) => {
     const data = await client.getPeerTransfer(req.params.iface, decodeURIComponent(req.params.pubkey));
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -94,7 +95,7 @@ router.get('/audit-logs', async (req, res) => {
     const data = await client.getAuditLogs(limit, offset);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

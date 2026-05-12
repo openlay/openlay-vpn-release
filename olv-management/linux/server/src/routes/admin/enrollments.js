@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { verifyAdminSignature } = require('../../services/adminSigning');
@@ -44,7 +45,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ enrollments: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -241,7 +242,7 @@ router.post('/:id/approve', async (req, res) => {
     res.json({ deviceId, userId, enterpriseId, assignmentId });
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   } finally {
     client.release();
   }
@@ -268,7 +269,7 @@ router.post('/:id/reject', async (req, res) => {
     }
     res.json({ status: rows[0].status });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

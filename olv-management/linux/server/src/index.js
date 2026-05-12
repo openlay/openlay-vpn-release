@@ -53,7 +53,12 @@ if (corsAllow.length > 0) {
   app.use(cors());
   console.warn('[cors] NODE_ENV=development — Access-Control-Allow-Origin: *');
 }
-app.use(express.json());
+// Default body-size cap. iOS clients send small JSON (<10kb), agent
+// register payloads top out around 5kb. 1mb covers every legitimate
+// admin payload with headroom and rejects accidental/malicious payload
+// bombs before pg or downstream parsers see them. /api/test-results
+// gets its own 10mb cap below — rawLog can be large.
+app.use(express.json({ limit: '1mb' }));
 
 // API routes
 app.use('/api/servers', serversRouter);
@@ -83,8 +88,9 @@ app.use('/api/enterprises', enterprisesRouter);
 app.use('/api/enrollment', enrollmentRouter);
 app.use('/api', userGroupsRouter);
 
-// Test results (root only)
-app.post('/api/test-results', enterpriseContext, async (req, res) => {
+// Test results (root only). Raw test logs can be large — give this
+// route its own 10mb limit while keeping the global 1mb default tight.
+app.post('/api/test-results', express.json({ limit: '10mb' }), enterpriseContext, async (req, res) => {
   try {
     if (req.enterpriseRole !== 'root') return res.status(403).json({ error: 'Root only' });
     const { serverId, summary, rawLog } = req.body;

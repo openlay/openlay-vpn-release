@@ -7,6 +7,7 @@ const config = require('../config');
 const { verifyAppleIdentityToken } = require('../services/appleAuth');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
 const rl = require('../middleware/rateLimit');
+const { sendError } = require('../middleware/errorHandler');
 
 // Same wording as /api/connect + /api/enroll so the user sees one
 // consistent message no matter which hop refuses the request.
@@ -155,7 +156,7 @@ router.post('/apple', rl.apple, async (req, res) => {
     if (err.code === 'ERR_JWT_EXPIRED' || err.code === 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED') {
       return res.status(401).json({ error: 'Invalid Apple identity token' });
     }
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -273,7 +274,7 @@ router.post('/login', rl.login, async (req, res) => {
     });
   } catch (err) {
     console.error('[auth/login] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -431,7 +432,7 @@ router.post('/device', rl.device, async (req, res) => {
     });
   } catch (err) {
     console.error('[auth/device] error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -462,7 +463,7 @@ router.get('/me', jwtAuth, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

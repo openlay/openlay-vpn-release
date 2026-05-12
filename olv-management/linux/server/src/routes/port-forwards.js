@@ -2,9 +2,12 @@
 // because admins shopping for a "port forward" screen won't grep for
 // "rdr". The underlying agent commands are all rdrXxx.
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -18,14 +21,6 @@ async function verifyAccess(serverId, req) {
   if (rows[0].access_mode === 'public' && !isRoot) throw Object.assign(new Error('Root required'), { status: 403 });
 }
 
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required' });
-    return false;
-  }
-  return true;
-}
-
 router.get('/', async (req, res) => {
   try {
     await verifyAccess(req.params.serverId, req);
@@ -35,7 +30,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ rules: rows });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -93,7 +88,7 @@ router.post('/', async (req, res) => {
       throw dbErr;
     }
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -149,7 +144,7 @@ router.put('/:ruleId', async (req, res) => {
     }
     res.json(rows[0]);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -176,7 +171,7 @@ router.delete('/:ruleId', async (req, res) => {
       [req.params.ruleId, req.params.serverId]);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

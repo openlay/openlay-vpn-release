@@ -9,6 +9,7 @@
 //     change state and the JWT is sufficient.
 
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const sshKeyVault = require('../../services/sshKeyVault');
 const { verifyAdminSignature } = require('../../services/adminSigning');
 const enterpriseContext = require('../../middleware/enterpriseContext');
@@ -65,7 +66,7 @@ router.post('/', async (req, res) => {
         code: 'duplicate_fingerprint',
       });
     }
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -81,7 +82,7 @@ router.get('/', async (req, res) => {
     });
     res.json({ keys });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -95,7 +96,7 @@ router.get('/:id/public-key', async (req, res) => {
     if (!pub) return res.status(404).json({ error: 'SSH key not found' });
     res.json({ public_key: pub });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -113,7 +114,7 @@ router.delete('/:id', async (req, res) => {
     if (!ok) return res.status(404).json({ error: 'SSH key not found' });
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

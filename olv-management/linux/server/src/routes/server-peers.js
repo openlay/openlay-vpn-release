@@ -6,6 +6,7 @@
 // only peers where assigned_ip is non-null and not expired — those
 // are the ones admin can usefully target right now.
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const enterpriseContext = require('../middleware/enterpriseContext');
 
@@ -54,7 +55,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ peers: rows });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { generateKeyPair, generatePresharedKey } = require('../services/keygen');
@@ -6,18 +7,11 @@ const { buildClientConfig } = require('../services/configBuilder');
 const { resyncRulesByUsers } = require('../services/ruleOrchestrator');
 
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
-
-// Admin gate for mutation paths. Reading the peer list is fine for
-// members; creating / deleting / renaming a peer reshapes who has
-// access to the network and must be admin-only.
-function requireAdmin(req, res) {
-  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return true;
-  res.status(403).json({ error: 'Admin access required' });
-  return false;
-}
 
 async function getClientAndServer(serverId, req) {
   const isRoot = req.enterpriseRole === 'root';
@@ -158,7 +152,7 @@ router.get('/', async (req, res) => {
 
     res.json({ peers: enrichedPeers });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -417,7 +411,7 @@ router.post('/', async (req, res) => {
         catch (rmErr) { console.error('[peers POST] compensation removePeer failed:', rmErr.message); }
       }
     }
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   } finally {
     if (tx) tx.release();
   }
@@ -459,7 +453,7 @@ router.delete('/:pubkey', async (req, res) => {
 
     res.json({ removed: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -470,7 +464,7 @@ router.post('/:pubkey/enable', async (req, res) => {
     const data = await client.enablePeer(req.params.iface, decodeURIComponent(req.params.pubkey));
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -481,7 +475,7 @@ router.post('/:pubkey/disable', async (req, res) => {
     const data = await client.disablePeer(req.params.iface, decodeURIComponent(req.params.pubkey));
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -502,7 +496,7 @@ router.patch('/:pubkey/alias', async (req, res) => {
 
     res.json({ alias });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -513,7 +507,7 @@ router.post('/:pubkey/rotate-keys', async (req, res) => {
     const data = await client.rotatePeerKeys(req.params.iface, decodeURIComponent(req.params.pubkey));
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -525,7 +519,7 @@ router.patch('/:pubkey/endpoint', async (req, res) => {
     const data = await client.setPeerEndpoint(req.params.iface, decodeURIComponent(req.params.pubkey), endpoint);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -537,7 +531,7 @@ router.patch('/:pubkey/allowed-ips', async (req, res) => {
     const data = await client.setPeerAllowedIPs(req.params.iface, decodeURIComponent(req.params.pubkey), allowedIPs);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -549,7 +543,7 @@ router.patch('/:pubkey/keepalive', async (req, res) => {
     const data = await client.setPeerKeepalive(req.params.iface, decodeURIComponent(req.params.pubkey), seconds);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

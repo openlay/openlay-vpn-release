@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 
@@ -57,7 +58,7 @@ router.get('/', async (req, res) => {
 
     res.json({ settings });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -97,7 +98,7 @@ router.put('/', async (req, res) => {
     }
     res.json({ settings });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

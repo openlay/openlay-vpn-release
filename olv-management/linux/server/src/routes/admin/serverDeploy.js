@@ -15,6 +15,7 @@
 //     unambiguous to both client and server.
 
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const crypto = require('crypto');
 const fs = require('fs');
 const { pool } = require('../../db/pool');
@@ -124,7 +125,7 @@ router.post('/test', async (req, res) => {
     });
     return res.json({ phase: 'done', result });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -215,7 +216,7 @@ router.post('/run', async (req, res) => {
 
     return res.status(202).json({ phase: 'started', job_id: job.id });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -242,7 +243,7 @@ router.get('/agent-version', async (req, res) => {
     const version = await agentBinarySource.getVersion();
     res.json({ version });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

@@ -1,8 +1,10 @@
 const express = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const router = express.Router();
 const crypto = require('crypto');
 const pool = require('../db/pool').pool;
 const jwtAuth = require('../middleware/jwtAuth');
+const { ROLE_RANK, canManageRole } = require('../constants/roles');
 
 // All enterprise routes require JWT
 router.use(jwtAuth);
@@ -58,7 +60,7 @@ router.post('/', async (req, res) => {
     }
   } catch (err) {
     console.error('[enterprises] Create error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -87,7 +89,7 @@ router.get('/', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -122,7 +124,7 @@ router.get('/:id', async (req, res) => {
       role: access.rows[0].role,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -166,16 +168,13 @@ router.put('/:id', async (req, res) => {
       industry: e.industry,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
-// Role hierarchy: root > super_admin > admin > member
-const ROLE_RANK = { root: 4, super_admin: 3, admin: 2, member: 1 };
-
-function canManage(callerRole, targetRole) {
-  return (ROLE_RANK[callerRole] || 0) > (ROLE_RANK[targetRole] || 0);
-}
+// Role hierarchy comes from constants/roles. Local alias kept so the
+// rest of the file reads naturally.
+const canManage = canManageRole;
 
 async function getCallerRole(userId, enterpriseId) {
   // Check root first
@@ -247,7 +246,7 @@ router.get('/:id/members', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -296,7 +295,7 @@ router.post('/:id/members', async (req, res) => {
     res.status(201).json({ ok: true });
   } catch (err) {
     if (err.code === '23503') return res.status(404).json({ error: 'User not found' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -336,7 +335,7 @@ router.put('/:id/members/:userId', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -365,7 +364,7 @@ router.delete('/:id/members/:userId', async (req, res) => {
     );
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

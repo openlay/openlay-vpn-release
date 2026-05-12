@@ -1,8 +1,11 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { resyncRulesByAlias } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -16,14 +19,6 @@ async function verifyAccess(serverId, req) {
   if (rows[0].access_mode === 'public' && !isRoot) throw Object.assign(new Error('Root required'), { status: 403 });
 }
 
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required' });
-    return false;
-  }
-  return true;
-}
-
 // GET /api/servers/:serverId/firewall/aliases
 router.get('/', async (req, res) => {
   try {
@@ -34,7 +29,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ aliases: rows });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -54,7 +49,7 @@ router.post('/', async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Alias name already exists' });
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -85,7 +80,7 @@ router.put('/:aliasId', async (req, res) => {
     }
     res.json(rows[0]);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -113,7 +108,7 @@ router.delete('/:aliasId', async (req, res) => {
     }
     res.json({ deleted: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

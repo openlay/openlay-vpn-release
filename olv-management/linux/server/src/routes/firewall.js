@@ -1,9 +1,12 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { createLogicalRule, deleteLogicalRule, groupPhysicalRules, resyncRulesByUsers, resyncRulesByZone, resyncRulesByAlias } = require('../services/ruleOrchestrator');
 const { resyncPoliciesByUsers } = require('../services/policyResync');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -24,14 +27,6 @@ async function getClient(serverId, req) {
   return new AgentClient(parseInt(serverId));
 }
 
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required for firewall management' });
-    return false;
-  }
-  return true;
-}
-
 // GET /api/servers/:serverId/firewall/policy
 router.get('/policy', async (req, res) => {
   try {
@@ -39,7 +34,7 @@ router.get('/policy', async (req, res) => {
     const result = await client.firewallGetPolicy();
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -51,7 +46,7 @@ router.put('/policy', async (req, res) => {
     const result = await client.firewallSetPolicy(req.body.defaultPolicy || req.body.default_policy);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -68,7 +63,7 @@ router.get('/all', async (req, res) => {
     }
     res.json({ ...result, interfaces: grouped });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -83,7 +78,7 @@ router.get('/logs', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -94,7 +89,7 @@ router.get('/:iface/rules', async (req, res) => {
     const result = await client.firewallGetRules(req.params.iface);
     res.json({ ...result, user: groupPhysicalRules(result.user || []) });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -105,7 +100,7 @@ router.get('/:iface/live', async (req, res) => {
     const result = await client.firewallListLive(req.params.iface);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -117,7 +112,7 @@ router.post('/:iface/rules', async (req, res) => {
     const logical = await createLogicalRule(parseInt(req.params.serverId), req.params.iface, req.body);
     res.status(201).json(logical);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -150,7 +145,7 @@ router.delete('/:iface/rules/:ruleId', async (req, res) => {
     const result = await deleteLogicalRule(parseInt(req.params.serverId), req.params.iface, req.params.ruleId);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -167,7 +162,7 @@ router.post('/resync-users', async (req, res) => {
     await resyncRulesByUsers(parseInt(req.params.serverId), userIds);
     res.json({ ok: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -185,7 +180,7 @@ router.post('/resync', async (req, res) => {
     for (const a of aliases) await resyncRulesByAlias(serverId, a.id);
     res.json({ ok: true, zonesResynced: zones.length, aliasesResynced: aliases.length });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -197,7 +192,7 @@ router.delete('/:iface/flush', async (req, res) => {
     const result = await client.firewallFlushRules(req.params.iface);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -211,7 +206,7 @@ router.post('/:iface/block-ip', async (req, res) => {
     const result = await client.firewallBlockIP(req.params.iface, ip, direction);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -225,7 +220,7 @@ router.post('/:iface/allow-ip', async (req, res) => {
     const result = await client.firewallAllowIP(req.params.iface, ip, direction);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -239,7 +234,7 @@ router.post('/:iface/block-port', async (req, res) => {
     const result = await client.firewallBlockPort(req.params.iface, port, protocol);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -253,7 +248,7 @@ router.post('/:iface/allow-port', async (req, res) => {
     const result = await client.firewallAllowPort(req.params.iface, port, protocol);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -267,7 +262,7 @@ router.post('/:iface/block-peer', async (req, res) => {
     const result = await client.firewallBlockPeer(req.params.iface, peerIP);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -281,7 +276,7 @@ router.post('/:iface/rate-limit', async (req, res) => {
     const result = await client.firewallRateLimitPeer(req.params.iface, peerIP, rateKbps);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 
 const router = Router();
@@ -113,7 +114,7 @@ router.get('/', async (req, res) => {
       private: assignedList,
     });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

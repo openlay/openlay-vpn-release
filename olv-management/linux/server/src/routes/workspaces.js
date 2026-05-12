@@ -1,4 +1,5 @@
 const express = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const router = express.Router({ mergeParams: true });
 const pool = require('../db/pool').pool;
 const jwtAuth = require('../middleware/jwtAuth');
@@ -38,7 +39,7 @@ router.post('/enterprises/:entId/workspaces', async (req, res) => {
     );
     res.status(201).json(formatWorkspace(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -72,7 +73,7 @@ router.get('/enterprises/:entId/workspaces', async (req, res) => {
 
     res.json({ workspaces: result.rows.map(formatWorkspace) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -116,7 +117,7 @@ router.get('/workspaces/:id', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -136,7 +137,7 @@ router.put('/workspaces/:id', async (req, res) => {
     );
     res.json(formatWorkspace(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -151,7 +152,7 @@ router.delete('/workspaces/:id', async (req, res) => {
     await pool.query('DELETE FROM workspaces WHERE id = $1', [req.params.id]);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -181,7 +182,7 @@ router.post('/workspaces/:id/servers', async (req, res) => {
     );
     res.status(201).json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -199,7 +200,7 @@ router.delete('/workspaces/:id/servers/:serverId', async (req, res) => {
     );
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -235,7 +236,7 @@ router.post('/workspaces/:id/members', async (req, res) => {
     );
     res.status(201).json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -255,7 +256,7 @@ router.get('/workspaces/:id/members', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -282,7 +283,7 @@ router.delete('/workspaces/:id/members/:userId', async (req, res) => {
     );
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

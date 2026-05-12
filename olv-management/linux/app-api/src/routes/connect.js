@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
@@ -629,7 +630,7 @@ router.post('/', async (req, res) => {
       exitNode: exitNodePayload,
     });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -876,7 +877,7 @@ refreshRouter.post('/', async (req, res) => {
     });
   } catch (err) {
     console.error('[refresh] unhandled error:', err);
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -925,7 +926,7 @@ router.get('/status', async (req, res) => {
 
     res.json({ connections });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

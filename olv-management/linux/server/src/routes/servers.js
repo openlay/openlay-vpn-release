@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const enterpriseContext = require('../middleware/enterpriseContext');
@@ -19,7 +20,7 @@ router.get('/available', jwtAuth, async (req, res) => {
     );
     res.json({ servers: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -48,7 +49,7 @@ router.get('/', async (req, res) => {
         );
     res.json({ servers: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -88,7 +89,7 @@ router.post('/subscribe', async (req, res) => {
 
     res.json({ ok: true, message: `Server "${server.rows[0].name}" is now assigned to your enterprise.` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -123,7 +124,7 @@ router.post('/assign', async (req, res) => {
       message: `Server "${server.rows[0].name}" assigned to "${ent.rows[0].name}" as ${accessMode}.`,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -147,7 +148,7 @@ router.post('/unassign', async (req, res) => {
 
     res.json({ ok: true, message: `Server "${server.rows[0].name}" unassigned and set to For Sale.` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -178,7 +179,7 @@ router.post('/approve', async (req, res) => {
       message: `Server "${server.rows[0].name}" approved as ${accessMode}.`,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -202,7 +203,7 @@ router.post('/reject', async (req, res) => {
 
     res.json({ ok: true, message: `Server "${server.rows[0].name}" rejected.` });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -223,7 +224,7 @@ router.post('/', async (req, res) => {
     );
     res.status(201).json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -247,7 +248,7 @@ router.get('/:id', async (req, res) => {
     }
     res.json(server);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -291,7 +292,7 @@ router.put('/:id', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Server not found' });
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -307,7 +308,7 @@ router.delete('/:id', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Server not found' });
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -325,7 +326,7 @@ router.get('/:id/health', async (req, res) => {
     const health = await client.health();
     res.json(health);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -347,7 +348,7 @@ router.get('/:id/agent-logs', async (req, res) => {
       res.json({ type: 'audit', logs: result.entries || [], total: result.total || 0 });
     }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -358,7 +359,7 @@ router.get('/:id/system-stats', async (req, res) => {
     const stats = await client.request('systemStats', {}, 5000);
     res.json(stats);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -369,7 +370,7 @@ router.get('/:id/agent-version', async (req, res) => {
     const health = await client.health();
     res.json({ version: health.version || 'unknown' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -407,7 +408,7 @@ router.post('/:id/agent-update', async (req, res) => {
     const result = await client.request('update', {}, 15000);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -444,7 +445,7 @@ router.get('/:id/users', async (req, res) => {
     `, [req.params.id, req.enterpriseId]);
     res.json({ users: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -476,7 +477,7 @@ router.post('/:id/users', async (req, res) => {
     res.status(201).json({ assignment: rows[0] });
   } catch (err) {
     if (err.code === '23503') return res.status(404).json({ error: 'User or server not found' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -504,7 +505,7 @@ router.delete('/:id/users/:assignmentId', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Assignment not found' });
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

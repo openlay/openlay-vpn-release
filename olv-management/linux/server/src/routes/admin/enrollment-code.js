@@ -1,7 +1,9 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const crypto = require('crypto');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
+const { isAdmin } = require('../../constants/roles');
 
 const CODE_TTL_MS = 60 * 60 * 1000; // 1h
 const CODE_VALUE_KEY = 'enrollment_code_value';
@@ -139,7 +141,7 @@ async function lookupEnterpriseByCode(code) {
 // Per-enterprise enrollment code is ops-level — anyone with admin powers in
 // the active enterprise can view/rotate. Members can't.
 function requireEnterpriseAdmin(req, res, next) {
-  if (['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) return next();
+  if (isAdmin(req.enterpriseRole)) return next();
   return res.status(403).json({ error: 'Only enterprise admins can view/rotate the enrollment code' });
 }
 
@@ -154,7 +156,7 @@ router.get('/', requireEnterpriseAdmin, async (req, res) => {
     const payload = await getOrRotateCode(req.enterpriseId);
     res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -166,7 +168,7 @@ router.post('/rotate', requireEnterpriseAdmin, async (req, res) => {
     const payload = await forceRotate(req.enterpriseId);
     res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

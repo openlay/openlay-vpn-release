@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { resyncRulesByUsers } = require('../../services/ruleOrchestrator');
@@ -87,7 +88,7 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(query, params);
     res.json({ devices: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -104,7 +105,7 @@ router.get('/pending-count', async (req, res) => {
         );
     res.json({ count: parseInt(rows[0].count, 10) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -156,7 +157,7 @@ router.get('/:id/users', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -270,7 +271,7 @@ router.put('/:id', async (req, res) => {
 
     res.json({ device: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -287,7 +288,7 @@ router.post('/:id/approve', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Device not found' });
     res.json({ device: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -304,7 +305,7 @@ router.post('/:id/reject', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Device not found' });
     res.json({ device: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -350,7 +351,7 @@ router.get('/:id/static-ips', async (req, res) => {
     `, [req.params.id, req.enterpriseId]);
     res.json({ staticIps: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -384,7 +385,7 @@ router.post('/:id/static-ips', async (req, res) => {
     res.status(201).json({ staticIp: rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Static IP already assigned' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -412,7 +413,7 @@ router.put('/:id/static-ips/:sipId', async (req, res) => {
     res.json({ staticIp: rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'IP address conflict' });
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -434,7 +435,7 @@ router.delete('/:id/static-ips/:sipId', async (req, res) => {
     if (existing[0]) await triggerStaticIpResync(existing[0].server_id, req.params.id);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -496,7 +497,7 @@ router.get('/:id/peers', async (req, res) => {
 
     res.json({ peers: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -536,7 +537,7 @@ router.get('/:id/postures', async (req, res) => {
     );
     res.json({ postures: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -556,7 +557,7 @@ router.get('/:id/postures/latest', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'No posture for this device' });
     res.json({ posture: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -681,7 +682,7 @@ router.delete('/:id', async (req, res) => {
 
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

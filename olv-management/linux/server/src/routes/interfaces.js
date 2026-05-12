@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const enterpriseContext = require('../middleware/enterpriseContext');
@@ -45,7 +46,7 @@ router.get('/', async (req, res) => {
     const data = await client.listInterfaces();
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -58,7 +59,7 @@ router.get('/all', async (req, res) => {
     const data = await client.listAllInterfaces();
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -89,7 +90,7 @@ router.get('/:iface', async (req, res) => {
 
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -203,7 +204,7 @@ router.post('/', async (req, res) => {
 
     res.status(201).json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -291,7 +292,7 @@ router.delete('/:iface', async (req, res) => {
 
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -303,7 +304,7 @@ router.post('/:iface/up', async (req, res) => {
     const data = await client.bringUp(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -315,7 +316,7 @@ router.post('/:iface/down', async (req, res) => {
     const data = await client.bringDown(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -327,7 +328,7 @@ router.post('/:iface/reload', async (req, res) => {
     const data = await client.reloadInterface(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -339,7 +340,7 @@ router.post('/:iface/save', async (req, res) => {
     const data = await client.saveConfig(req.params.iface);
     res.json(data);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

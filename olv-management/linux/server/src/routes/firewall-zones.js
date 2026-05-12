@@ -1,8 +1,11 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const { resyncRulesByZone } = require('../services/ruleOrchestrator');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -18,14 +21,6 @@ async function verifyAccess(serverId, req) {
   if (rows.length === 0) throw Object.assign(new Error('Server not found'), { status: 404 });
   if (rows[0].access_mode === 'public' && !isRoot) throw Object.assign(new Error('Root required for public server'), { status: 403 });
   return rows[0];
-}
-
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required' });
-    return false;
-  }
-  return true;
 }
 
 // Ensure built-in zones exist for a server
@@ -161,7 +156,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ zones: rows.map(z => ({ ...z, members: z.members || [] })) });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -180,7 +175,7 @@ router.post('/', async (req, res) => {
     res.status(201).json({ ...rows[0], members: [] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Zone name already exists' });
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -199,7 +194,7 @@ router.put('/:zoneId', async (req, res) => {
     );
     res.json(rows[0]);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -220,7 +215,7 @@ router.delete('/:zoneId', async (req, res) => {
     await pool.query('DELETE FROM firewall_zones WHERE id = $1', [req.params.zoneId]);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -277,7 +272,7 @@ router.post('/:zoneId/members', async (req, res) => {
   } catch (err) {
     try { await dbClient.query('ROLLBACK'); } catch {}
     dbClient.release();
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -313,7 +308,7 @@ router.delete('/:zoneId/members/:memberId', async (req, res) => {
   } catch (err) {
     try { await dbClient.query('ROLLBACK'); } catch {}
     dbClient.release();
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -324,7 +319,7 @@ router.get('/:zoneId/resolve', async (req, res) => {
     const ips = await resolveZone(parseInt(req.params.serverId), parseInt(req.params.zoneId));
     res.json({ ips });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

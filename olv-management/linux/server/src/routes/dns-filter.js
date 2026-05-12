@@ -1,7 +1,10 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const AgentClient = require('../services/agentClient');
 const enterpriseContext = require('../middleware/enterpriseContext');
+const { isAdmin } = require('../constants/roles');
+const { requireAdmin } = require('../middleware/serverAccess');
 
 const router = Router({ mergeParams: true });
 router.use(enterpriseContext);
@@ -21,14 +24,6 @@ async function getClient(serverId, req) {
   return new AgentClient(parseInt(serverId));
 }
 
-function requireAdmin(req, res) {
-  if (!['root', 'super_admin', 'admin'].includes(req.enterpriseRole)) {
-    res.status(403).json({ error: 'Admin access required for DNS filtering' });
-    return false;
-  }
-  return true;
-}
-
 // POST /api/servers/:serverId/dns/:iface/enable
 router.post('/:iface/enable', async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -37,7 +32,7 @@ router.post('/:iface/enable', async (req, res) => {
     const result = await client.dnsEnable(req.params.iface);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -49,7 +44,7 @@ router.post('/:iface/disable', async (req, res) => {
     const result = await client.dnsDisable(req.params.iface);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -60,7 +55,7 @@ router.get('/:iface/blocked', async (req, res) => {
     const result = await client.dnsListBlocked(req.params.iface);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -74,7 +69,7 @@ router.post('/:iface/block', async (req, res) => {
     const result = await client.dnsBlockDomain(req.params.iface, domain);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -88,7 +83,7 @@ router.post('/:iface/unblock', async (req, res) => {
     const result = await client.dnsUnblockDomain(req.params.iface, domain);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -99,7 +94,7 @@ router.get('/categories', async (req, res) => {
     const result = await client.dnsListCategories();
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -113,7 +108,7 @@ router.post('/:iface/category/enable', async (req, res) => {
     const result = await client.dnsEnableCategory(req.params.iface, category);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -127,7 +122,7 @@ router.post('/:iface/category/disable', async (req, res) => {
     const result = await client.dnsDisableCategory(req.params.iface, category);
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -138,7 +133,7 @@ router.get('/stats', async (req, res) => {
     const result = await client.dnsGetStats();
     res.json(result);
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

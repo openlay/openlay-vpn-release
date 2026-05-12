@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const { pool } = require('../db/pool');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
 
@@ -66,7 +67,7 @@ router.post('/', async (req, res) => {
 
     res.status(201).json({ device: rows[0] });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -79,7 +80,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ devices: rows });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -105,6 +106,18 @@ router.post('/:deviceId/posture', async (req, res) => {
         [enterpriseId]
       );
       enabled = setting[0]?.value === 'true';
+    }
+    // Per-device override: if this device's profile has require_posture=TRUE,
+    // accept submissions even when the enterprise-wide toggle is off. Matches
+    // the /api/config driver so the client can submit what it's told to send.
+    if (!enabled) {
+      const { rows: profCheck } = await pool.query(
+        `SELECT dp.require_posture FROM devices d
+           LEFT JOIN device_profiles dp ON dp.id = d.profile_id
+          WHERE d.id = $1`,
+        [deviceId]
+      );
+      if (profCheck[0]?.require_posture === true) enabled = true;
     }
     if (!enabled) return res.status(403).json({ error: 'Posture submission disabled' });
 
@@ -180,7 +193,7 @@ router.post('/:deviceId/posture', async (req, res) => {
     await pool.query(`UPDATE devices SET last_posture_at = NOW() WHERE id = $1`, [deviceId]);
     res.status(201).json({ ok: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -299,7 +312,7 @@ router.post('/:deviceId/rekey', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -320,7 +333,7 @@ router.put('/:deviceId', async (req, res) => {
 
     res.json({ device: rows[0] });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

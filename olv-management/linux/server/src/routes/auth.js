@@ -7,6 +7,8 @@ const config = require('../config');
 const pool = require('../db/pool').pool;
 const jwtAuth = require('../middleware/jwtAuth');
 const rl = require('../middleware/rateLimit');
+const { sendError } = require('../middleware/errorHandler');
+const { ROLE_RANK } = require('../constants/roles');
 
 // Simple password hashing using scrypt (no bcrypt dependency needed)
 async function hashPassword(password) {
@@ -278,7 +280,7 @@ router.post('/refresh', rl.refresh, async (req, res) => {
     res.json(pair);
   } catch (err) {
     console.error('[auth/refresh] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -298,7 +300,7 @@ router.delete('/session', jwtAuth, async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -426,7 +428,7 @@ router.post('/login', rl.login, async (req, res) => {
     });
   } catch (err) {
     console.error('[auth/login] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -491,7 +493,6 @@ router.post('/create-admin', jwtAuth, async (req, res) => {
 
       // Assign to enterprise — enforce role hierarchy
       if (enterpriseId) {
-        const ROLE_RANK = { root: 4, super_admin: 3, admin: 2, member: 1 };
         const callerEntRole = await pool.query(
           'SELECT role FROM user_enterprise_roles WHERE user_id = $1 AND enterprise_id = $2',
           [req.user.id, enterpriseId]
@@ -535,7 +536,7 @@ router.post('/create-admin', jwtAuth, async (req, res) => {
     }
   } catch (err) {
     console.error('[auth/create-admin] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -612,7 +613,7 @@ router.put('/reset-password', jwtAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[auth/reset-password] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -656,7 +657,7 @@ router.put('/reset-device', jwtAuth, async (req, res) => {
     res.json({ ok: true, message: 'Device lock reset. User can now login from a new device.' });
   } catch (err) {
     console.error('[auth/reset-device] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -711,7 +712,7 @@ router.post('/enroll-device', jwtAuth, async (req, res) => {
     res.status(201).json({ ok: true, message: 'Device enrolled successfully' });
   } catch (err) {
     console.error('[auth/enroll-device] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -756,7 +757,7 @@ router.get('/me', jwtAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[auth/me] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

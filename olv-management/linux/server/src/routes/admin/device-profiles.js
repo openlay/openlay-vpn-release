@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { verifyAdminSignature } = require('../../services/adminSigning');
@@ -111,7 +112,7 @@ router.get('/', async (req, res) => {
     );
     res.json({ profiles: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -181,7 +182,7 @@ router.post('/', async (req, res) => {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'A profile with this name already exists' });
     }
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -196,7 +197,7 @@ router.get('/:id', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
     res.json({ profile: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -317,7 +318,7 @@ router.put('/:id', async (req, res) => {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'A profile with this name already exists' });
     }
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -370,7 +371,7 @@ router.delete('/:id', async (req, res) => {
 
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

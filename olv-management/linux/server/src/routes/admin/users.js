@@ -1,9 +1,11 @@
 const { Router } = require('express');
+const { sendError } = require('../../middleware/errorHandler');
 const { pool } = require('../../db/pool');
 const enterpriseContext = require('../../middleware/enterpriseContext');
 const { verifyAdminSignature } = require('../../services/adminSigning');
 const AgentClient = require('../../services/agentClient');
 const { resyncRulesByUsers } = require('../../services/ruleOrchestrator');
+const { ROLE_RANK } = require('../../constants/roles');
 
 const router = Router();
 router.use(enterpriseContext);
@@ -76,7 +78,7 @@ router.get('/', async (req, res) => {
       ORDER BY u.created_at DESC`, params);
     res.json({ users: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -145,7 +147,7 @@ router.get('/:id', async (req, res) => {
 
     res.json({ user: { ...users[0], enterprise_alias: alias }, devices, peers, assignments, enterprises });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -184,7 +186,6 @@ router.put('/:id', async (req, res) => {
     }
 
     // Role hierarchy: cannot modify user with higher/equal rank
-    const ROLE_RANK = { root: 4, super_admin: 3, admin: 2, member: 1 };
     const callerRank = ROLE_RANK[req.enterpriseRole] || 0;
 
     const rootCheck = await pool.query('SELECT 1 FROM root_users WHERE user_id = $1', [req.params.id]);
@@ -254,7 +255,7 @@ router.put('/:id', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json({ user: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -308,7 +309,6 @@ router.delete('/:id', async (req, res) => {
     }
 
     // Role hierarchy check
-    const ROLE_RANK = { root: 4, super_admin: 3, admin: 2, member: 1 };
     const callerRank = ROLE_RANK[req.enterpriseRole] || 0;
     const rootCheck = await pool.query('SELECT 1 FROM root_users WHERE user_id = $1', [req.params.id]);
     const targetEntRole = await pool.query(
@@ -612,7 +612,7 @@ router.delete('/:id', async (req, res) => {
 
     res.json({ deleted: true, soft: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -650,7 +650,7 @@ router.post('/:id/server-access', async (req, res) => {
     );
     res.status(201).json({ assignment: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -664,7 +664,7 @@ router.delete('/:id/server-access/:assignId', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Assignment not found' });
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

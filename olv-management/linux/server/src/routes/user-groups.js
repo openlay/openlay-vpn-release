@@ -1,7 +1,9 @@
 const express = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const router = express.Router({ mergeParams: true });
 const pool = require('../db/pool').pool;
 const jwtAuth = require('../middleware/jwtAuth');
+const { isAdmin, ADMIN_ROLES } = require('../constants/roles');
 
 router.use(jwtAuth);
 
@@ -73,7 +75,7 @@ async function resyncPoliciesAfterGroupChange(groupId) {
 // POST — Create user group (super_admin only)
 router.post('/enterprises/:entId/user-groups', async (req, res) => {
   try {
-    const role = await requireEnterpriseRole(req.user.id, req.params.entId, ['root', 'super_admin', 'admin']);
+    const role = await requireEnterpriseRole(req.user.id, req.params.entId, [...ADMIN_ROLES]);
     if (!role) return res.status(403).json({ error: 'admin access or higher required' });
 
     const { name, description } = req.body;
@@ -85,7 +87,7 @@ router.post('/enterprises/:entId/user-groups', async (req, res) => {
     );
     res.status(201).json(formatUserGroup(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -116,7 +118,7 @@ router.get('/enterprises/:entId/user-groups', async (req, res) => {
 
     res.json({ userGroups: result.rows.map(formatUserGroup) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -152,7 +154,7 @@ router.get('/user-groups/:id', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -161,7 +163,7 @@ router.put('/user-groups/:id', async (req, res) => {
   try {
     const entId = await getUserGroupEnterprise(req.params.id);
     if (!entId) return res.status(404).json({ error: 'User group not found' });
-    const role = await requireEnterpriseRole(req.user.id, entId, ['root', 'super_admin', 'admin']);
+    const role = await requireEnterpriseRole(req.user.id, entId, [...ADMIN_ROLES]);
     if (!role) return res.status(403).json({ error: 'admin access or higher required' });
 
     const { name, description } = req.body;
@@ -172,7 +174,7 @@ router.put('/user-groups/:id', async (req, res) => {
     );
     res.json(formatUserGroup(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -181,7 +183,7 @@ router.delete('/user-groups/:id', async (req, res) => {
   try {
     const entId = await getUserGroupEnterprise(req.params.id);
     if (!entId) return res.status(404).json({ error: 'User group not found' });
-    const role = await requireEnterpriseRole(req.user.id, entId, ['root', 'super_admin', 'admin']);
+    const role = await requireEnterpriseRole(req.user.id, entId, [...ADMIN_ROLES]);
     if (!role) return res.status(403).json({ error: 'admin access or higher required' });
 
     // Refuse delete when the group still has dependents. CASCADE would
@@ -210,7 +212,7 @@ router.delete('/user-groups/:id', async (req, res) => {
     await pool.query('DELETE FROM user_groups WHERE id = $1', [req.params.id]);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -261,7 +263,7 @@ router.post('/user-groups/:id/members', async (req, res) => {
     await resyncAppServersAfterGroupChange(req.params.id);
     res.status(201).json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -281,7 +283,7 @@ router.get('/user-groups/:id/members', async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -290,7 +292,7 @@ router.delete('/user-groups/:id/members/:userId', async (req, res) => {
   try {
     const entId = await getUserGroupEnterprise(req.params.id);
     if (!entId) return res.status(404).json({ error: 'User group not found' });
-    const role = await requireEnterpriseRole(req.user.id, entId, ['root', 'super_admin', 'admin']);
+    const role = await requireEnterpriseRole(req.user.id, entId, [...ADMIN_ROLES]);
     if (!role) {
       const gm = await pool.query(
         'SELECT role FROM user_group_members WHERE user_group_id = $1 AND user_id = $2',
@@ -309,7 +311,7 @@ router.delete('/user-groups/:id/members/:userId', async (req, res) => {
     await resyncAppServersAfterGroupChange(req.params.id);
     res.json({ deleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

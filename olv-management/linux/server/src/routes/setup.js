@@ -10,6 +10,7 @@ const { createRemoteJWKSet, jwtVerify } = require('jose');
 const config = require('../config');
 const { pool } = require('../db/pool');
 const rl = require('../middleware/rateLimit');
+const { sendError } = require('../middleware/errorHandler');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
@@ -46,7 +47,7 @@ router.get('/status', async (req, res) => {
       setup_token_configured: setupTokenConfigured(),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -167,7 +168,7 @@ router.post('/root-enroll', rl.setup, async (req, res) => {
     });
   } catch (err) {
     console.error('[setup/root-enroll] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

@@ -5,6 +5,7 @@
 // alone — admin decides when to decommission it.
 
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const enterpriseContext = require('../middleware/enterpriseContext');
 const { migrateServer } = require('../services/migrateOrchestrator');
 
@@ -46,7 +47,7 @@ router.post('/:sourceId', async (req, res) => {
     res.status(status).json(result);
   } catch (err) {
     console.error(`[migrate] FAIL source=${req.params.sourceId} dest=${req.params.destId}: ${err.message}`, err.stack);
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 

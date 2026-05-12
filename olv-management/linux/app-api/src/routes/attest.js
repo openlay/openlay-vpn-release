@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const { sendError } = require('../middleware/errorHandler');
 const crypto = require('crypto');
 const { verifyAttestation } = require('node-app-attest');
 const { pool } = require('../db/pool');
@@ -21,7 +22,7 @@ router.get('/challenge', async (req, res) => {
 
     res.json({ challenge });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
@@ -118,7 +119,7 @@ router.post('/verify', async (req, res) => {
 
     res.json({ verified: true, keyId });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    sendError(res, err, req);
   }
 });
 
