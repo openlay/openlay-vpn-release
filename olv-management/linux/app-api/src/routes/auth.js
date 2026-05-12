@@ -6,6 +6,7 @@ const { pool } = require('../db/pool');
 const config = require('../config');
 const { verifyAppleIdentityToken } = require('../services/appleAuth');
 const { verifySecureEnclaveSignature } = require('../services/signatureVerifier');
+const rl = require('../middleware/rateLimit');
 
 // Same wording as /api/connect + /api/enroll so the user sees one
 // consistent message no matter which hop refuses the request.
@@ -90,7 +91,7 @@ async function verifyPassword(password, hash) {
 const router = Router();
 
 // POST /api/auth/apple
-router.post('/apple', async (req, res) => {
+router.post('/apple', rl.apple, async (req, res) => {
   try {
     const identityToken = req.body.identityToken || req.body.identity_token;
     const name = req.body.name;
@@ -156,7 +157,7 @@ router.post('/apple', async (req, res) => {
 });
 
 // POST /api/auth/login — Username/password login with device auto-enrollment
-router.post('/login', async (req, res) => {
+router.post('/login', rl.login, async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -287,7 +288,7 @@ router.post('/login', async (req, res) => {
 // In challenge flow.
 const DEVICE_AUTH_CHALLENGE_TTL_S = 120;
 
-router.post('/device/challenge', async (req, res) => {
+router.post('/device/challenge', rl.deviceChallenge, async (req, res) => {
   try {
     const { deviceId } = req.body || {};
     if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
@@ -322,7 +323,7 @@ router.post('/device/challenge', async (req, res) => {
 // Challenge MUST have been issued by /api/auth/device/challenge for this
 // device. Single-use: marked used on first successful verify; replays
 // (including legitimate retries with the same body) fail with 401.
-router.post('/device', async (req, res) => {
+router.post('/device', rl.device, async (req, res) => {
   try {
     const { deviceId, challenge, signature } = req.body || {};
     if (!deviceId || !challenge || !signature) {

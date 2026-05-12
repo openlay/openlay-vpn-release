@@ -38,7 +38,21 @@ const { startExpiryChecker } = require('./services/expiryChecker');
 
 const app = express();
 
-app.use(cors());
+// CORS: closed by default. The admin web UI was retired 2026-05-12 and
+// the only API consumers now are native iOS clients + agent WebSocket
+// (neither does browser CORS preflight) plus app-api server-to-server
+// (Node fetch ignores CORS). A permissive `Access-Control-Allow-Origin:
+// *` would only help a future browser caller — which would be a
+// security regression we should re-evaluate explicitly. Set
+// CORS_ALLOWED_ORIGINS=https://foo,https://bar in .env to opt in.
+const corsAllow = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+if (corsAllow.length > 0) {
+  app.use(cors({ origin: corsAllow, credentials: true }));
+} else if (process.env.NODE_ENV === 'development') {
+  app.use(cors());
+  console.warn('[cors] NODE_ENV=development — Access-Control-Allow-Origin: *');
+}
 app.use(express.json());
 
 // API routes

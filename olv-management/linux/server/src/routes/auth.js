@@ -6,6 +6,7 @@ const { createRemoteJWKSet, jwtVerify } = require('jose');
 const config = require('../config');
 const pool = require('../db/pool').pool;
 const jwtAuth = require('../middleware/jwtAuth');
+const rl = require('../middleware/rateLimit');
 
 // Simple password hashing using scrypt (no bcrypt dependency needed)
 async function hashPassword(password) {
@@ -128,7 +129,7 @@ function verifyDeviceSignature(publicKeyBase64, challengeText, signatureBase64) 
 const CHALLENGE_TTL_SEC = 300; // 5 min — tight enough to thwart replay.
 
 // POST /api/auth/apple — Verify Apple identity token, upsert user, return JWT
-router.post('/apple', async (req, res) => {
+router.post('/apple', rl.apple, async (req, res) => {
   try {
     const identityToken = req.body.identityToken || req.body.identity_token;
     const name = req.body.name;
@@ -213,7 +214,7 @@ router.post('/apple', async (req, res) => {
 //   { refreshToken, challenge: { nonce, timestamp, refreshTokenHash }, signature }
 // The challenge is signed client-side with the Secure Enclave private key;
 // the server verifies against the device's stored SE public key.
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', rl.refresh, async (req, res) => {
   try {
     const refreshToken = req.body.refreshToken || req.body.refresh_token;
     const challenge = req.body.challenge || {};
@@ -294,7 +295,7 @@ router.delete('/session', jwtAuth, async (req, res) => {
 });
 
 // POST /api/auth/login — Username/password login with auto device enrollment
-router.post('/login', async (req, res) => {
+router.post('/login', rl.login, async (req, res) => {
   try {
     const { username, password } = req.body;
     // Device info sent from client for auto-enrollment

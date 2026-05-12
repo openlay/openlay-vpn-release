@@ -35,6 +35,7 @@ module.exports = {
     process.env.TLS_CERT_DIR || 'certs'
   ),
   jwtSecret: process.env.JWT_SECRET || DEFAULT_JWT_SECRET,
+  rateLimitDisabled: process.env.RATE_LIMIT_DISABLED === 'true',
   internalApiKey: process.env.INTERNAL_API_KEY || '',
   appleClientIds: (process.env.APPLE_CLIENT_IDS || 'com.openlay.vpnmanagement').split(',').map(s => s.trim()),
   appleTeamId: process.env.APPLE_TEAM_ID || '',

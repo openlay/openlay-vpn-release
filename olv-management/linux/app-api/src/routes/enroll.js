@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { verifyAttestation } = require('node-app-attest');
 const { pool } = require('../db/pool');
 const config = require('../config');
+const rl = require('../middleware/rateLimit');
 
 const CODE_VALUE_KEY = 'enrollment_code_value';
 const CODE_EXPIRES_KEY = 'enrollment_code_expires_at';
@@ -18,7 +19,7 @@ const router = Router();
 // the client must include in its App Attest attestation. We persist it in
 // `attest_challenges` with a NULL user_id (since the device hasn't enrolled
 // yet) and a short TTL. /api/enroll consumes the row and marks it used.
-router.post('/challenge', async (req, res) => {
+router.post('/challenge', rl.enrollChallenge, async (req, res) => {
   try {
     const challenge = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
@@ -39,7 +40,7 @@ router.post('/challenge', async (req, res) => {
 // We look it up across enterprise_settings, validate expiry, then record
 // a pending enrollment_request pre-stamped with that enterprise_id so the
 // admin doesn't have to pick at approve time (they still can override).
-router.post('/', async (req, res) => {
+router.post('/', rl.enroll, async (req, res) => {
   try {
     const code = req.body?.code;
     const deviceName = req.body?.deviceName ?? req.body?.device_name;
@@ -48,8 +49,12 @@ router.post('/', async (req, res) => {
     const osVersion = req.body?.osVersion ?? req.body?.os_version;
     const publicKey = req.body?.publicKey ?? req.body?.public_key;
 
-    if (!code || typeof code !== 'string' || !/^\d{10}$/.test(code)) {
-      return res.status(400).json({ error: 'code must be a 10-digit string' });
+    // Accept 10–14 digits to span the rollout window: codes generated
+    // before the 14-digit bump are still in DB with 1h TTL, so reject
+    // them and the admin has to re-fetch. Once those expire (≤1h after
+    // mgmt deploy) the 10 case never matches.
+    if (!code || typeof code !== 'string' || !/^\d{10,14}$/.test(code)) {
+      return res.status(400).json({ error: 'code must be a 10–14 digit string' });
     }
     if (!deviceName || !hardwareId || !os || !publicKey) {
       return res.status(400).json({

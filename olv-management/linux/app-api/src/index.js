@@ -17,10 +17,53 @@ const appAttest = require('./middleware/appAttest');
 
 const app = express();
 
-app.use(cors());
+// CORS: closed by default. iOS client traffic is native HTTP (no
+// preflight). Set CORS_ALLOWED_ORIGINS=https://foo in .env to opt in
+// any browser caller explicitly. Dev mode falls back to the previous
+// permissive default.
+const corsAllow = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+if (corsAllow.length > 0) {
+  app.use(cors({ origin: corsAllow, credentials: true }));
+} else if (process.env.NODE_ENV === 'development') {
+  app.use(cors());
+  console.warn('[cors] NODE_ENV=development — Access-Control-Allow-Origin: *');
+}
 app.use(express.json());
 
-// Request/Response logger with body
+// Request/Response logger with bodies — redacted. The unredacted version
+// would dump JWTs issued by /api/auth/apple, Apple identity tokens
+// received from clients, SE signatures, App Attest assertions, WG
+// pre-shared keys, etc. into stdout (and from there into journalctl,
+// log-shipping, syslog, etc.). Anyone with read access to those logs
+// would inherit full session tokens for every active user. The redaction
+// keys list mirrors every secret-shaped field in our request/response
+// schemas; add new ones as routes grow.
+const REDACT_KEYS = new Set([
+  'token', 'access_token', 'refresh_token', 'jwt', 'authorization',
+  'identityToken', 'identity_token', 'authorizationCode', 'authorization_code',
+  'signature', 'assertion', 'attestation',
+  'publicKey', 'public_key', 'privateKey', 'private_key',
+  'presharedKey', 'preshared_key', 'psk',
+  'password', 'pwd',
+  'apiToken', 'api_token', 'managementApiToken',
+]);
+
+function redact(value, depth = 0) {
+  if (depth > 6 || value == null) return value;
+  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
+  if (typeof value !== 'object') return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (REDACT_KEYS.has(k)) {
+      out[k] = typeof v === 'string' && v.length > 0 ? `<redacted ${v.length}ch>` : '<redacted>';
+    } else {
+      out[k] = redact(v, depth + 1);
+    }
+  }
+  return out;
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const { method, url } = req;
@@ -28,7 +71,7 @@ app.use((req, res, next) => {
 
   console.log(`\n→ ${method} ${url} [${ip}]`);
   if (req.body && Object.keys(req.body).length > 0) {
-    console.log('  req body:', JSON.stringify(req.body, null, 2));
+    console.log('  req body:', JSON.stringify(redact(req.body), null, 2));
   }
 
   // Capture response body
@@ -36,7 +79,7 @@ app.use((req, res, next) => {
   res.json = (body) => {
     const ms = Date.now() - start;
     console.log(`← ${method} ${url} ${res.statusCode} ${ms}ms`);
-    console.log('  res body:', JSON.stringify(body, null, 2));
+    console.log('  res body:', JSON.stringify(redact(body), null, 2));
     return originalJson(body);
   };
 

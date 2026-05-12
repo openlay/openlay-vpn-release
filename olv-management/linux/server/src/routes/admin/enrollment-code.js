@@ -7,8 +7,21 @@ const CODE_TTL_MS = 60 * 60 * 1000; // 1h
 const CODE_VALUE_KEY = 'enrollment_code_value';
 const CODE_EXPIRES_KEY = 'enrollment_code_expires_at';
 
+// 14 digits ≈ 46.5 bits of entropy. The previous 10-digit code (33 bits)
+// could be brute-forced in ≤10⁶ requests if rate limiting ever
+// regressed — by the time we noticed, an attacker could mint a
+// signed-by-our-CA agent cert. Bumping the length costs nothing on the
+// admin side (still a copy-paste) and pairs with the per-IP rate limit
+// on /api/enroll to make brute force impractical even if the throttle
+// is misconfigured. Generated via two randomInt calls because
+// crypto.randomInt's range is bounded by Number.MAX_SAFE_INTEGER —
+// 10¹⁴ is safe but we split for headroom + clarity.
+const CODE_DIGITS = 14;
+
 function generateCode() {
-  return crypto.randomInt(0, 1e10).toString().padStart(10, '0');
+  const hi = crypto.randomInt(0, 1e7).toString().padStart(7, '0');
+  const lo = crypto.randomInt(0, 1e7).toString().padStart(7, '0');
+  return hi + lo;
 }
 
 /**

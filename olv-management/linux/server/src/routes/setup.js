@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { createRemoteJWKSet, jwtVerify } = require('jose');
 const config = require('../config');
 const { pool } = require('../db/pool');
+const rl = require('../middleware/rateLimit');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
@@ -53,7 +54,7 @@ router.get('/status', async (req, res) => {
 // Verifies the setup token, then the Apple identity token. If both check out
 // AND no root exists yet, upserts the user and adds them to root_users in a
 // single transaction, then returns the same login payload as /api/auth/apple.
-router.post('/root-enroll', async (req, res) => {
+router.post('/root-enroll', rl.setup, async (req, res) => {
   try {
     if (!setupTokenConfigured()) {
       return res.status(410).json({ error: 'Setup not enabled on this server' });
