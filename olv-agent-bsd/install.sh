@@ -1,33 +1,6 @@
 #!/bin/sh
-# OpenLay VPN agent installer for FreeBSD 14.4-RELEASE.
+# OpenLay VPN agent installer for FreeBSD 13.2+.
 # Run as root. Idempotent — safe to re-run after an upgrade.
-#
-# Three ways to invoke:
-#
-#   1. One-liner (fetch + run). Downloads everything on demand.
-#      fetch https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh \
-#        && sh install.sh
-#
-#   2. From a local release bundle (this directory with bin/ populated).
-#        cd olv-agent-bsd && ./install.sh
-#
-#   3. From the olv-agent-bsd source tree (deploy/freebsd/install.sh, with
-#      `make freebsd` having produced ../../bin/olv-agent-freebsd-amd64).
-#
-# Env overrides:
-#   MANAGEMENT_API_URL — mgmt URL; if set, no prompt. Example: https://mng.livevpn.com:3084
-#   ENROLLMENT_TOKEN   — one-time token from mgmt; if set, no prompt.
-#   BASE_URL   — raw URL prefix for remote fetches (default: GitHub main).
-#   BIN_SRC    — explicit path to a pre-built binary; skips arch detection.
-#   OLV_TARGET_FIBS — FreeBSD net.fibs boot tunable (default 4).
-#
-# Fastest install (interactive — prompts URL + token):
-#   fetch -o - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh | sh
-#
-# Or non-interactive:
-#   MANAGEMENT_API_URL=https://mng.livevpn.com:3084 ENROLLMENT_TOKEN=xxx \
-#     sh -c "$(fetch -qo - https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd/install.sh)"
-
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -36,77 +9,10 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BASE_URL="${BASE_URL:-https://raw.githubusercontent.com/openlay/openlay-vpn-release/main/olv-agent-bsd}"
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-	amd64|x86_64) BIN_NAME="olv-agent-freebsd-amd64" ;;
-	arm64|aarch64) BIN_NAME="olv-agent-freebsd-arm64" ;;
-	*) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
-esac
-
-# -------------------------------------------------------------------------
-# Resolve the working directory that holds bin/ + olv-agent.rc + agent.conf.sample.
-#
-# Precedence:
-#   1. Caller overrode BIN_SRC → use as-is, derive ASSET_DIR from its parent.
-#   2. $HERE/bin/<BIN_NAME> exists → release-bundle layout (git clone of the
-#      openlay-vpn-release repo).
-#   3. $HERE/../../bin/<BIN_NAME> exists → source-tree layout (running
-#      deploy/freebsd/install.sh from olv-agent-bsd after `make freebsd`).
-#   4. Nothing local → one-liner mode: fetch everything into /tmp from
-#      $BASE_URL and verify the binary with SHA256SUMS.
-#
-# ASSET_DIR is where agent.conf.sample + olv-agent.rc live for step [4/6].
-# -------------------------------------------------------------------------
-
-ASSET_DIR="$HERE"
-if [ -n "${BIN_SRC:-}" ]; then
-	:
-elif [ -x "$HERE/bin/$BIN_NAME" ]; then
-	BIN_SRC="$HERE/bin/$BIN_NAME"
-elif [ -x "$HERE/../../bin/$BIN_NAME" ]; then
-	BIN_SRC="$HERE/../../bin/$BIN_NAME"
-	# Source tree layout: rc file + conf sample are in deploy/freebsd/ (=HERE).
-else
-	echo "==> binaries not found locally — fetching from $BASE_URL"
-	need_bin() { command -v "$1" >/dev/null || { echo "need $1 in PATH" >&2; exit 1; }; }
-	need_bin fetch
-	need_bin sha256
-
-	STAGE="$(mktemp -d -t olv-agent-install.XXXXXX)"
-	trap 'rm -rf "$STAGE"' EXIT INT TERM
-	mkdir -p "$STAGE/bin"
-
-	# The handful of files the installer needs at runtime. README / VERSION
-	# are informational and skipped to keep the one-liner quick.
-	fetch -q -o "$STAGE/bin/$BIN_NAME" "$BASE_URL/bin/$BIN_NAME"
-	fetch -q -o "$STAGE/SHA256SUMS"   "$BASE_URL/SHA256SUMS"
-	fetch -q -o "$STAGE/olv-agent.rc" "$BASE_URL/olv-agent.rc"
-	fetch -q -o "$STAGE/agent.conf.sample" "$BASE_URL/agent.conf.sample"
-
-	# Verify sha256 — integrity is the entire point of shipping SHA256SUMS.
-	echo "==> verifying $BIN_NAME"
-	EXPECTED="$(awk -v f="$BIN_NAME" '$2 == f { print $1 }' "$STAGE/SHA256SUMS")"
-	if [ -z "$EXPECTED" ]; then
-		echo "no checksum for $BIN_NAME in SHA256SUMS" >&2
-		exit 1
-	fi
-	GOT="$(sha256 -q "$STAGE/bin/$BIN_NAME")"
-	if [ "$EXPECTED" != "$GOT" ]; then
-		echo "sha256 mismatch for $BIN_NAME" >&2
-		echo "  expected $EXPECTED" >&2
-		echo "  got      $GOT" >&2
-		exit 1
-	fi
-
-	chmod 755 "$STAGE/bin/$BIN_NAME"
-	BIN_SRC="$STAGE/bin/$BIN_NAME"
-	ASSET_DIR="$STAGE"
-fi
+BIN_SRC="${BIN_SRC:-$HERE/../../bin/olv-agent-freebsd-amd64}"
 
 if [ ! -x "$BIN_SRC" ]; then
-	echo "binary not executable at $BIN_SRC" >&2
+	echo "binary not found at $BIN_SRC — run 'make freebsd' first" >&2
 	exit 1
 fi
 
@@ -184,105 +90,82 @@ install -d -m 0755 /usr/local/etc/olv-agent
 install -d -m 0755 /usr/local/etc/wireguard
 install -d -m 0700 /var/db/olv-agent/certs
 
-if [ ! -f /usr/local/etc/olv-agent/agent.conf ]; then
-	# Collect mgmt URL + enrollment token up front so the agent can come
-	# online immediately. Values from env vars win (non-interactive /
-	# automated installs); otherwise prompt the operator.
-	URL_VAL="${MANAGEMENT_API_URL:-}"
-	TOKEN_VAL="${ENROLLMENT_TOKEN:-}"
-	if [ -z "$URL_VAL" ] || [ -z "$TOKEN_VAL" ]; then
-		# Bind stdin to the terminal in case the script was piped (`fetch |
-		# sh`) — otherwise /dev/stdin is the pipe, not the keyboard.
-		if [ ! -t 0 ] && [ -e /dev/tty ]; then
-			exec </dev/tty
-		fi
-	fi
-	if [ -z "$URL_VAL" ]; then
-		printf 'Management URL (e.g. https://mng.livevpn.com:3084): '
-		read URL_VAL
-	fi
-	if [ -z "$TOKEN_VAL" ]; then
-		printf 'Enrollment token: '
-		read TOKEN_VAL
-	fi
-	if [ -z "$URL_VAL" ] || [ -z "$TOKEN_VAL" ]; then
-		echo "MANAGEMENT_API_URL and ENROLLMENT_TOKEN are both required" >&2
-		exit 1
-	fi
-	install -m 0600 "$ASSET_DIR/agent.conf.sample" /usr/local/etc/olv-agent/agent.conf
-	# In-place substitute placeholders. The sample has `replace-me` for the
-	# token and the staging URL for MANAGEMENT_API_URL; both get rewritten.
-	URL_ESC=$(printf '%s\n' "$URL_VAL" | sed 's#[\\/&]#\\&#g')
-	TOKEN_ESC=$(printf '%s\n' "$TOKEN_VAL" | sed 's#[\\/&]#\\&#g')
-	sed -i '' \
-		-e "s#^MANAGEMENT_API_URL=.*#MANAGEMENT_API_URL=$URL_ESC#" \
-		-e "s#^ENROLLMENT_TOKEN=.*#ENROLLMENT_TOKEN=$TOKEN_ESC#" \
-		/usr/local/etc/olv-agent/agent.conf
-	echo "  wrote /usr/local/etc/olv-agent/agent.conf"
+CONF=/usr/local/etc/olv-agent/agent.conf
+if [ ! -f "$CONF" ]; then
+	install -m 0600 "$HERE/agent.conf.sample" "$CONF"
+	echo "  wrote $CONF (edit it now!)"
 fi
 
-echo "  installing rc.d service file"
-install -m 0755 "$ASSET_DIR/olv-agent.rc" /usr/local/etc/rc.d/olv-agent
+# TLS-verify migration. The 2026-05-13 binary cut (Phase 2.2) removed
+# the hardcoded InsecureSkipVerify; default is now strict x509
+# verification against system roots. Go 1.15+ rejects CN-only certs
+# ("certificate relies on legacy Common Name field"), so an agent
+# upgraded onto an env with a self-signed CN-only mgmt cert will hang
+# in a reconnect loop until OLV_MGMT_INSECURE_TLS=true is set. Probe
+# the configured mgmt host's cert before the binary takes over; if it
+# lacks SAN, add the flag so the upgrade is non-breaking. An operator-
+# set OLV_MGMT_INSECURE_TLS or OLV_MGMT_TLS_CERT wins — we never
+# overwrite an explicit choice.
+if grep -q '^OLV_MGMT_INSECURE_TLS=' "$CONF" || grep -q '^OLV_MGMT_TLS_CERT=' "$CONF"; then
+	echo "  TLS verification already configured in $CONF — leaving as-is"
+else
+	MGMT_URL=$(awk -F= '$1=="MANAGEMENT_API_URL" {print $2; exit}' "$CONF" | tr -d '"' | tr -d "'")
+	if [ -n "$MGMT_URL" ]; then
+		HOST=$(echo "$MGMT_URL" | sed -E 's|^https?://||; s|/.*$||')
+		HOSTNAME=$(echo "$HOST" | cut -d: -f1)
+		PORT=$(echo "$HOST" | awk -F: 'NF>1 {print $2; exit} {print 3084}')
+		echo "  probing mgmt cert at $HOSTNAME:$PORT for SAN extension"
+		CERT_TEXT=$(echo | openssl s_client -connect "$HOSTNAME:$PORT" -servername "$HOSTNAME" 2>/dev/null \
+			| openssl x509 -noout -text 2>/dev/null || true)
+		NEEDS_INSECURE=0
+		if [ -z "$CERT_TEXT" ]; then
+			echo "    mgmt unreachable — defaulting to insecure to avoid post-upgrade lockout"
+			NEEDS_INSECURE=1
+		elif echo "$CERT_TEXT" | grep -q "X509v3 Subject Alternative Name"; then
+			echo "    cert has SAN — strict verification will work; no flag added"
+		else
+			echo "    cert is CN-only (Go strict verify will reject) — appending OLV_MGMT_INSECURE_TLS=true"
+			NEEDS_INSECURE=1
+		fi
+		if [ "$NEEDS_INSECURE" = "1" ]; then
+			{
+				echo ""
+				echo "# Auto-added by install.sh on $(date -u +%FT%TZ): mgmt cert at"
+				echo "# $MGMT_URL is CN-only (no SAN). To remove this flag,"
+				echo "# regenerate the mgmt cert with subjectAltName=DNS:$HOSTNAME"
+				echo "# and re-run install.sh."
+				echo "OLV_MGMT_INSECURE_TLS=true"
+			} >> "$CONF"
+		fi
+	else
+		echo "  MANAGEMENT_API_URL not set in $CONF — skip cert probe"
+	fi
+fi
+
+install -m 0755 "$HERE/olv-agent.rc" /usr/local/etc/rc.d/olv-agent
 
 echo "[5/6] enabling + starting service"
 sysrc olv_agent_enable=YES >/dev/null
-# Start in the background so the installer returns even if the agent's
-# first enrollment handshake takes a while. service(8) otherwise waits
-# for rc.d to return, and `daemon -f` can block briefly until the child
-# detaches — which on a slow-network host looks like a hang.
-(
-	service olv-agent restart || service olv-agent start
-) >/var/log/olv-agent-install.log 2>&1 &
-SVC_PID=$!
-# Give it up to 10s to fork the daemon; don't block longer.
-WAITED=0
-while kill -0 "$SVC_PID" 2>/dev/null && [ "$WAITED" -lt 10 ]; do
-	sleep 1
-	WAITED=$((WAITED + 1))
-done
-if kill -0 "$SVC_PID" 2>/dev/null; then
-	echo "  service start still running after ${WAITED}s — continuing; check /var/log/olv-agent-install.log"
-else
-	wait "$SVC_PID" 2>/dev/null || true
-	echo "  service start returned"
-fi
+service olv-agent restart || service olv-agent start
 
 # `service olv-agent restart` returning success does NOT guarantee the
 # daemon stayed alive. The rc.d script can return before the forked
 # daemon dies (port 53 collision with the still-shutting-down old
 # process, stale pidfile race, immediate exit on config error, etc.).
-# Observed prod 2026-05-10: install.sh logged "service start returned"
-# at completion, but `service olv-agent status` 30 minutes later said
-# "not running" — operators only noticed when traffic stopped.
-#
-# Verify daemon is actually alive 5s after the restart returned. If
-# not, surface the agent log so the operator sees the real error
-# instead of a silent failure.
+# Verify daemon is actually alive 5s later, surface log on failure.
 echo "  verifying daemon is alive..."
 sleep 5
-if service olv-agent status >/dev/null 2>&1; then
-	# Double-check via pidfile + process — `status` only reads the
-	# pidfile, doesn't verify the pid actually exists.
-	PIDFILE=/var/run/olv_agent.pid
-	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-		echo "  daemon alive (pid $(cat "$PIDFILE"))"
-	else
-		echo "  ERROR: pidfile present but process dead — daemon failed to stay running" >&2
-		echo "  ---- /var/log/olv-agent.log (last 30 lines) ----" >&2
-		tail -30 /var/log/olv-agent.log 2>/dev/null >&2 || echo "  (log file not readable)" >&2
-		exit 1
-	fi
+PIDFILE=/var/run/olv_agent.pid
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+	echo "  daemon alive (pid $(cat "$PIDFILE"))"
 else
 	echo "  ERROR: daemon failed to stay running after restart" >&2
 	echo "  ---- /var/log/olv-agent.log (last 30 lines) ----" >&2
 	tail -30 /var/log/olv-agent.log 2>/dev/null >&2 || echo "  (log file not readable)" >&2
-	echo "  ---- /var/log/olv-agent-install.log ----" >&2
-	cat /var/log/olv-agent-install.log 2>/dev/null >&2 || echo "  (no install log)" >&2
 	exit 1
 fi
 
 echo "[6/6] done."
 echo
-echo "Config : /usr/local/etc/olv-agent/agent.conf"
-echo "Logs   : tail -f /var/log/olv-agent.log"
-echo "Restart: service olv-agent restart"
+echo "Edit /usr/local/etc/olv-agent/agent.conf, then: service olv-agent restart"
+echo "Logs: tail -f /var/log/olv-agent.log"
