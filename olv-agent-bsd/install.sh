@@ -108,13 +108,38 @@ install -m 0755 "$HERE/olv-agent.rc" /usr/local/etc/rc.d/olv-agent
 
 echo "[5/6] enabling + starting service"
 sysrc olv_agent_enable=YES >/dev/null
-service olv-agent restart || service olv-agent start
+# Explicit stop → verify dead → start is safer than `restart`. Past
+# upgrades produced two olv-agent workers simultaneously because the
+# rc.d restart path returned before the previous worker had fully
+# exited, so daemon(8) cheerfully forked a sibling. The rc.d script's
+# stop_postcmd waits for the binary to disappear; doing stop+start
+# here (instead of restart) lets that wait take effect.
+service olv-agent stop >/dev/null 2>&1 || true
+# Belt-and-braces: kill anything still alive by name. The agent also
+# refuses to start without exclusive flock on /var/run/olv-agent.lock,
+# so a missed kill would surface as a clean "already running" error
+# rather than a silent duplicate.
+if pgrep -x olv-agent >/dev/null 2>&1; then
+	pkill -TERM -x olv-agent >/dev/null 2>&1 || true
+	i=0
+	while [ $i -lt 10 ]; do
+		pgrep -x olv-agent >/dev/null 2>&1 || break
+		sleep 1
+		i=$((i + 1))
+	done
+	if pgrep -x olv-agent >/dev/null 2>&1; then
+		echo "  stuck worker(s) — forcing SIGKILL"
+		pkill -KILL -x olv-agent >/dev/null 2>&1 || true
+		sleep 1
+	fi
+fi
+service olv-agent start
 
-# `service olv-agent restart` returning success does NOT guarantee the
+# `service olv-agent start` returning success does NOT guarantee the
 # daemon stayed alive. The rc.d script can return before the forked
-# daemon dies (port 53 collision with the still-shutting-down old
-# process, stale pidfile race, immediate exit on config error, etc.).
-# Verify daemon is actually alive 5s later, surface log on failure.
+# daemon dies (immediate exit on config error, flock contention with a
+# zombie sibling, port 53 collision, etc.). Verify daemon is actually
+# alive 5s later, surface log on failure.
 echo "  verifying daemon is alive..."
 sleep 5
 PIDFILE=/var/run/olv_agent.pid

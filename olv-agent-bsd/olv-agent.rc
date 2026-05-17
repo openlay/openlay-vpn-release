@@ -25,4 +25,59 @@ command="/usr/sbin/daemon"
 procname="/usr/local/sbin/olv-agent"
 command_args="-p ${pidfile} -f -o /var/log/olv-agent.log ${procname} -config ${olv_agent_config}"
 
+start_precmd="olv_agent_prestart"
+stop_postcmd="olv_agent_poststop"
+
+# Defense-in-depth: the agent now holds a flock(2) on
+# /var/run/olv-agent.lock and refuses to start when a sibling worker is
+# alive, but we still want rc.d to surface the duplicate as a clean
+# "already-running" rather than letting daemon(8) fork a doomed child
+# that immediately exits. Kill any stale worker before starting and
+# wait for the binary to fully exit so daemon(8)'s new fork has the
+# field to itself.
+olv_agent_prestart()
+{
+	# pgrep -x matches the exact basename of the binary, not daemon(8).
+	if pgrep -x olv-agent >/dev/null 2>&1; then
+		echo "olv-agent: lingering worker(s) detected, terminating..."
+		pkill -TERM -x olv-agent >/dev/null 2>&1 || true
+		i=0
+		while [ $i -lt 10 ]; do
+			pgrep -x olv-agent >/dev/null 2>&1 || break
+			sleep 1
+			i=$((i + 1))
+		done
+		if pgrep -x olv-agent >/dev/null 2>&1; then
+			echo "olv-agent: forcing SIGKILL on stuck worker(s)"
+			pkill -KILL -x olv-agent >/dev/null 2>&1 || true
+			sleep 1
+		fi
+	fi
+	# Clear any stale pidfile that rc.subr would otherwise honour as a
+	# dead-pid-no-op. daemon(8) -p will rewrite it on the next fork.
+	if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+		rm -f "$pidfile"
+	fi
+	return 0
+}
+
+# `service stop` only sends SIGTERM and returns when the pid named in
+# the pidfile is gone — but the daemon(8) wrapper or a hand-launched
+# sibling worker can outlive that. Block until every olv-agent process
+# is gone so an immediate `start` doesn't end up sharing the host with
+# a half-dead predecessor.
+olv_agent_poststop()
+{
+	i=0
+	while [ $i -lt 15 ]; do
+		pgrep -x olv-agent >/dev/null 2>&1 || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	echo "olv-agent: worker(s) still alive after stop — forcing SIGKILL"
+	pkill -KILL -x olv-agent >/dev/null 2>&1 || true
+	sleep 1
+	return 0
+}
+
 run_rc_command "$1"
