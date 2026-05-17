@@ -229,8 +229,20 @@ function attachWebSocketServer(httpsServer) {
       if (helloTimeout) clearTimeout(helloTimeout);
       if (pingTimer) clearInterval(pingTimer);
       if (serverId) {
-        registry.unregister(serverId);
-        console.log(`[wsServer] Connection closed: serverId=${serverId}`);
+        // Only unregister if the registry still points at THIS ws. A new
+        // connection from the same agent (network blip, sibling worker,
+        // etc.) calls register() which kicks our ws via close(); that
+        // close event lands here AFTER the new ws has taken over the
+        // serverId slot. Without this guard, the late-close handler
+        // would unregister the new ws too, producing the infinite
+        // register/unregister ping-pong observed pre-fix.
+        const current = registry.getConnection(serverId);
+        if (current && current.ws === ws) {
+          registry.unregister(serverId);
+          console.log(`[wsServer] Connection closed: serverId=${serverId}`);
+        } else {
+          console.log(`[wsServer] Late-close ignored: serverId=${serverId} (slot now holds a newer connection)`);
+        }
       }
     });
 
