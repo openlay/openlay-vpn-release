@@ -90,56 +90,9 @@ install -d -m 0755 /usr/local/etc/olv-agent
 install -d -m 0755 /usr/local/etc/wireguard
 install -d -m 0700 /var/db/olv-agent/certs
 
-CONF=/usr/local/etc/olv-agent/agent.conf
-if [ ! -f "$CONF" ]; then
-	install -m 0600 "$HERE/agent.conf.sample" "$CONF"
-	echo "  wrote $CONF (edit it now!)"
-fi
-
-# TLS-verify migration. The 2026-05-13 binary cut (Phase 2.2) removed
-# the hardcoded InsecureSkipVerify; default is now strict x509
-# verification against system roots. Go 1.15+ rejects CN-only certs
-# ("certificate relies on legacy Common Name field"), so an agent
-# upgraded onto an env with a self-signed CN-only mgmt cert will hang
-# in a reconnect loop until OLV_MGMT_INSECURE_TLS=true is set. Probe
-# the configured mgmt host's cert before the binary takes over; if it
-# lacks SAN, add the flag so the upgrade is non-breaking. An operator-
-# set OLV_MGMT_INSECURE_TLS or OLV_MGMT_TLS_CERT wins — we never
-# overwrite an explicit choice.
-if grep -q '^OLV_MGMT_INSECURE_TLS=' "$CONF" || grep -q '^OLV_MGMT_TLS_CERT=' "$CONF"; then
-	echo "  TLS verification already configured in $CONF — leaving as-is"
-else
-	MGMT_URL=$(awk -F= '$1=="MANAGEMENT_API_URL" {print $2; exit}' "$CONF" | tr -d '"' | tr -d "'")
-	if [ -n "$MGMT_URL" ]; then
-		HOST=$(echo "$MGMT_URL" | sed -E 's|^https?://||; s|/.*$||')
-		HOSTNAME=$(echo "$HOST" | cut -d: -f1)
-		PORT=$(echo "$HOST" | awk -F: 'NF>1 {print $2; exit} {print 3084}')
-		echo "  probing mgmt cert at $HOSTNAME:$PORT for SAN extension"
-		CERT_TEXT=$(echo | openssl s_client -connect "$HOSTNAME:$PORT" -servername "$HOSTNAME" 2>/dev/null \
-			| openssl x509 -noout -text 2>/dev/null || true)
-		NEEDS_INSECURE=0
-		if [ -z "$CERT_TEXT" ]; then
-			echo "    mgmt unreachable — defaulting to insecure to avoid post-upgrade lockout"
-			NEEDS_INSECURE=1
-		elif echo "$CERT_TEXT" | grep -q "X509v3 Subject Alternative Name"; then
-			echo "    cert has SAN — strict verification will work; no flag added"
-		else
-			echo "    cert is CN-only (Go strict verify will reject) — appending OLV_MGMT_INSECURE_TLS=true"
-			NEEDS_INSECURE=1
-		fi
-		if [ "$NEEDS_INSECURE" = "1" ]; then
-			{
-				echo ""
-				echo "# Auto-added by install.sh on $(date -u +%FT%TZ): mgmt cert at"
-				echo "# $MGMT_URL is CN-only (no SAN). To remove this flag,"
-				echo "# regenerate the mgmt cert with subjectAltName=DNS:$HOSTNAME"
-				echo "# and re-run install.sh."
-				echo "OLV_MGMT_INSECURE_TLS=true"
-			} >> "$CONF"
-		fi
-	else
-		echo "  MANAGEMENT_API_URL not set in $CONF — skip cert probe"
-	fi
+if [ ! -f /usr/local/etc/olv-agent/agent.conf ]; then
+	install -m 0600 "$HERE/agent.conf.sample" /usr/local/etc/olv-agent/agent.conf
+	echo "  wrote /usr/local/etc/olv-agent/agent.conf (edit it now!)"
 fi
 
 install -m 0755 "$HERE/olv-agent.rc" /usr/local/etc/rc.d/olv-agent
