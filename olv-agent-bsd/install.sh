@@ -9,10 +9,19 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN_SRC="${BIN_SRC:-$HERE/../../bin/olv-agent-freebsd-amd64}"
+# BIN_SRC: try the release layout first (script next to bin/), then
+# fall back to the source layout (script at deploy/freebsd/, bin/ two
+# levels up). An explicit BIN_SRC=… env var still wins.
+if [ -z "${BIN_SRC:-}" ]; then
+	for candidate in \
+		"$HERE/bin/olv-agent-freebsd-amd64" \
+		"$HERE/../../bin/olv-agent-freebsd-amd64"; do
+		if [ -x "$candidate" ]; then BIN_SRC="$candidate"; break; fi
+	done
+fi
 
-if [ ! -x "$BIN_SRC" ]; then
-	echo "binary not found at $BIN_SRC — run 'make freebsd' first" >&2
+if [ -z "${BIN_SRC:-}" ] || [ ! -x "$BIN_SRC" ]; then
+	echo "binary not found near $HERE — set BIN_SRC=<path> or run 'make freebsd' from source" >&2
 	exit 1
 fi
 
